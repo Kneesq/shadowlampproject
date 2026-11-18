@@ -1,0 +1,35 @@
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+
+# Generated 3D model files and temporary outputs
+*.stl
+*.3mf
+static/shadow_lamp_*.stl
+
+# Logs & temp files
+*.log
+tmp/
+temp/

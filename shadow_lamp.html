@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Shadow Lamp Generator — single-file, no server needed">
+  <title>Shadow Lamp Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+:root{--bg-primary:#0a0e1a;--bg-secondary:#111827;--bg-card:rgba(17,24,39,.7);--bg-glass:rgba(30,41,59,.5);--border-glass:rgba(99,130,255,.15);--accent:#6c8aff;--accent-glow:rgba(108,138,255,.35);--accent-hover:#8ba3ff;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--success:#34d399;--warning:#fbbf24;--danger:#f87171;--radius:12px;--transition:.25s cubic-bezier(.4,0,.2,1)}*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color:var(--text-primary);overflow:hidden}.app{display:flex;height:100vh}.panel{width:380px;min-width:340px;background:var(--bg-card);backdrop-filter:blur(24px);border-right:1px solid var(--border-glass);display:flex;flex-direction:column;overflow-y:auto;z-index:10}.panel-header{padding:28px 24px 20px;border-bottom:1px solid var(--border-glass)}.panel-header h1{font-size:20px;font-weight:700;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent),#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}.panel-header p{font-size:12px;color:var(--text-muted);margin-top:4px}.panel-body{flex:1;padding:20px 24px;display:flex;flex-direction:column;gap:20px}.section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:10px}.upload-zone{border:2px dashed var(--border-glass);border-radius:var(--radius);padding:32px 16px;text-align:center;cursor:pointer;transition:var(--transition);position:relative;overflow:hidden}.upload-zone:hover,.upload-zone.drag-over{border-color:var(--accent);background:rgba(108,138,255,.05)}.upload-zone.has-image{padding:8px;border-style:solid;border-color:var(--accent)}.upload-zone .icon{font-size:36px;margin-bottom:8px;opacity:.5}.upload-zone .label{font-size:13px;color:var(--text-secondary)}.upload-zone .sublabel{font-size:11px;color:var(--text-muted);margin-top:4px}.upload-zone img{max-width:100%;max-height:160px;border-radius:8px;display:block;margin:0 auto}.upload-zone input[type="file"]{display:none}.slider-group{display:flex;flex-direction:column;gap:14px}.slider-row{display:flex;flex-direction:column;gap:4px}.slider-label{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-secondary)}.slider-label .value{font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums;min-width:56px;text-align:right}input[type="range"]{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:3px;background:var(--bg-secondary);outline:none;cursor:pointer}input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-primary);box-shadow:0 0 8px var(--accent-glow);transition:var(--transition)}input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.2);box-shadow:0 0 14px var(--accent-glow)}.btn-group{display:flex;gap:10px;margin-top:auto;padding-top:12px}.btn{flex:1;padding:12px 16px;border:none;border-radius:var(--radius);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:var(--transition);display:flex;align-items:center;justify-content:center;gap:6px}.btn-primary{background:linear-gradient(135deg,var(--accent),#8b5cf6);color:#fff;box-shadow:0 4px 16px var(--accent-glow)}.btn-primary:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 24px var(--accent-glow)}.btn-primary:disabled{opacity:.4;cursor:not-allowed}.btn-secondary{background:var(--bg-glass);color:var(--text-primary);border:1px solid var(--border-glass)}.btn-secondary:hover:not(:disabled){background:rgba(30,41,59,.8);border-color:var(--accent)}.status-bar{padding:12px 24px;border-top:1px solid var(--border-glass);font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:8px}.status-dot{width:6px;height:6px;border-radius:50%;background:var(--text-muted);transition:var(--transition)}.status-dot.ready{background:var(--success)}.status-dot.busy{background:var(--warning);animation:pulse 1s infinite}.status-dot.error{background:var(--danger)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.viewport{flex:1;position:relative;background:var(--bg-primary)}.viewport canvas{display:block;width:100%!important;height:100%!important}.loading-overlay{position:absolute;inset:0;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}.loading-overlay.visible{opacity:1;pointer-events:all}.spinner{width:40px;height:40px;border:3px solid var(--border-glass);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.loading-overlay p{margin-top:16px;font-size:13px;color:var(--text-secondary)}.viewport-hud{position:absolute;top:16px;right:16px;display:flex;gap:8px;z-index:5}.hud-badge{padding:6px 12px;background:var(--bg-glass);backdrop-filter:blur(12px);border:1px solid var(--border-glass);border-radius:8px;font-size:11px;color:var(--text-secondary);font-variant-numeric:tabular-nums}.panel::-webkit-scrollbar{width:4px}.panel::-webkit-scrollbar-track{background:transparent}.panel::-webkit-scrollbar-thumb{background:var(--border-glass);border-radius:2px}.shape-selector{display:flex;gap:12px;margin-bottom:10px}.radio-label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;padding:6px 12px;border-radius:8px;border:1px solid var(--border-glass);transition:var(--transition)}.radio-label:hover{border-color:var(--accent)}.radio-label input[type="radio"]{accent-color:var(--accent)}.radio-label input[type="radio"]:checked+span{color:var(--accent);font-weight:600}.upload-zone-sm{padding:16px 12px;margin-top:8px}.upload-zone-sm .icon{font-size:24px;margin-bottom:4px}.upload-zone-sm .label{font-size:12px}.upload-zone-sm .sublabel{font-size:10px}.upload-zone-sm img{max-height:80px}select{width:100%;padding:8px 12px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-glass);border-radius:8px;font-family:inherit;font-size:12px;cursor:pointer;outline:none}select:focus{border-color:var(--accent)}@media(max-width:768px){.app{flex-direction:column}.panel{width:100%;min-width:unset;max-height:45vh;border-right:none;border-bottom:1px solid var(--border-glass)}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <div class="panel-header">
+        <h1>Shadow Lamp</h1>
+        <p>Upload a silhouette → 3D-printable table lamp (offline)</p>
+      </div>
+      <div class="panel-body">
+        <section>
+          <div class="section-title">Shadow Pattern</div>
+          <div class="upload-zone" id="uploadZone">
+            <div class="icon">🌗</div>
+            <div class="label">Drop silhouette image here</div>
+            <div class="sublabel">PNG / JPG — black &amp; white</div>
+            <input type="file" id="fileInput" accept="image/*">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Shell Shape</div>
+          <div class="shape-selector">
+            <label class="radio-label"><input type="radio" name="shellShape" value="cylinder" id="shapeCylinder" checked><span>Cylinder</span></label>
+            <label class="radio-label"><input type="radio" name="shellShape" value="custom" id="shapeCustom"><span>Custom Profile</span></label>
+          </div>
+          <div class="upload-zone upload-zone-sm" id="profileZone" style="display:none">
+            <div class="icon">🏺</div>
+            <div class="label">Drop profile side-view</div>
+            <div class="sublabel">Black silhouette on white</div>
+            <input type="file" id="profileInput" accept="image/*">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Base Shape</div>
+          <select id="baseShape">
+            <option value="circle">Circle (Cylinder)</option>
+            <option value="triangle">Triangle</option>
+            <option value="square">Square</option>
+            <option value="pentagon">Pentagon</option>
+            <option value="hexagon">Hexagon</option>
+          </select>
+        </section>
+        <section>
+          <div class="section-title">Upper Shell (Above Light)</div>
+          <select id="upperShell">
+            <option value="solid">Keep (Solid)</option>
+            <option value="hollow" selected>Remove (Hollow)</option>
+          </select>
+          <div class="slider-row" id="upperShellHeightRow" style="margin-top:10px">
+            <div class="slider-label"><span>📏 Upper Shell Height</span><span class="value" id="upperShellHeightVal">15 mm</span></div>
+            <input type="range" id="upperShellHeight" min="5" max="50" value="15" step="1">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Bottom Style</div>
+          <select id="bottomStyle">
+            <option value="open">Without Bottom (Open)</option>
+            <option value="closed" selected>With Bottom (Closed Plate)</option>
+          </select>
+          <div class="slider-row" id="bottomThicknessRow" style="margin-top:10px">
+            <div class="slider-label"><span>📏 Bottom Thickness</span><span class="value" id="bottomThicknessVal">3 mm</span></div>
+            <input type="range" id="bottomThickness" min="1" max="10" value="3" step="0.5">
+          </div>
+          <div class="slider-row" id="bottomHoleRow" style="margin-top:10px">
+            <div class="slider-label"><span>🕳️ Base Hole Diameter</span><span class="value" id="bottomHoleDiamVal">30 mm</span></div>
+            <input type="range" id="bottomHoleDiam" min="0" max="80" value="30" step="1">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">3D Print Supports (Vertical Ribs)</div>
+          <select id="supportCount">
+            <option value="0" selected>None</option>
+            <option value="2">2 Columns</option>
+            <option value="3">3 Columns</option>
+            <option value="4">4 Columns</option>
+            <option value="6">6 Columns</option>
+          </select>
+          <div class="slider-row" id="supportWidthRow" style="margin-top:10px">
+            <div class="slider-label"><span>柱宽 Column Width</span><span class="value" id="supportWidthVal">4.0 mm</span></div>
+            <input type="range" id="supportWidth" min="2" max="10" value="4" step="0.5">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Projection Target</div>
+          <div class="shape-selector">
+            <label class="radio-label"><input type="radio" name="projMode" value="floor" id="projFloor" checked><span>Floor</span></label>
+            <label class="radio-label"><input type="radio" name="projMode" value="wall" id="projWall"><span>Wall (Wrap)</span></label>
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Parameters</div>
+          <div class="slider-group">
+            <div class="slider-row"><div class="slider-label"><span>💡 Light Brightness</span><span class="value" id="brightnessVal">3x</span></div><input type="range" id="brightness" min="1" max="10" value="3" step="0.5"></div>
+            <div class="slider-row"><div class="slider-label"><span>💡 Bulb Height</span><span class="value" id="bulbHeightVal">50 mm</span></div><input type="range" id="bulbHeight" min="10" max="150" value="50" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shell Diameter</span><span class="value" id="diameterVal">100 mm</span></div><input type="range" id="diameter" min="30" max="200" value="100" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shell Height</span><span class="value" id="heightVal">100 mm</span></div><input type="range" id="height" min="0" max="300" value="100" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Wall Thickness</span><span class="value" id="thicknessVal">2.0 mm</span></div><input type="range" id="thickness" min="1" max="5" value="2" step="0.5"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shadow Size</span><span class="value" id="shadowSizeVal">300 mm</span></div><input type="range" id="shadowSize" min="100" max="800" value="300" step="10"></div>
+            <div class="slider-row"><div class="slider-label"><span>Resolution</span><span class="value" id="resolutionVal">200</span></div><input type="range" id="resolution" min="80" max="800" value="200" step="20"></div>
+          </div>
+        </section>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="downloadBtn" disabled>⬇ Download STL</button>
+          <button class="btn btn-secondary" id="resetBtn">↻ Reset</button>
+        </div>
+      </div>
+      <div class="status-bar"><span class="status-dot" id="statusDot"></span><span id="statusText">No image loaded</span></div>
+    </aside>
+    <main class="viewport" id="viewport">
+      <div class="viewport-hud"><div class="hud-badge" id="triCount">Faces: —</div></div>
+      <div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div><p id="loadingText">Generating STL…</p></div>
+    </main>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }}
+  </script>
+  <script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── DOM ──
+const viewport=document.getElementById('viewport'), uploadZone=document.getElementById('uploadZone'),
+  fileInput=document.getElementById('fileInput'), profileZone=document.getElementById('profileZone'),
+  profileInput=document.getElementById('profileInput'), downloadBtn=document.getElementById('downloadBtn'),
+  resetBtn=document.getElementById('resetBtn'), statusDot=document.getElementById('statusDot'),
+  statusText=document.getElementById('statusText'), triCount=document.getElementById('triCount'),
+  loadingOverlay=document.getElementById('loadingOverlay'), loadingTextEl=document.getElementById('loadingText'),
+  shapeCylinder=document.getElementById('shapeCylinder'), shapeCustom=document.getElementById('shapeCustom');
+
+const S={
+  brightness:{el:document.getElementById('brightness'),vEl:document.getElementById('brightnessVal'),fmt:v=>`${(+v).toFixed(1)}x`},
+  bulbHeight:{el:document.getElementById('bulbHeight'),vEl:document.getElementById('bulbHeightVal'),fmt:v=>`${v} mm`},
+  diameter:{el:document.getElementById('diameter'),vEl:document.getElementById('diameterVal'),fmt:v=>`${v} mm`},
+  height:{el:document.getElementById('height'),vEl:document.getElementById('heightVal'),fmt:v=>v==='0'?'0 mm (Stencil)':`${v} mm`},
+  thickness:{el:document.getElementById('thickness'),vEl:document.getElementById('thicknessVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+  shadowSize:{el:document.getElementById('shadowSize'),vEl:document.getElementById('shadowSizeVal'),fmt:v=>`${v} mm`},
+  resolution:{el:document.getElementById('resolution'),vEl:document.getElementById('resolutionVal'),fmt:v=>v},
+  upperShellHeight:{el:document.getElementById('upperShellHeight'),vEl:document.getElementById('upperShellHeightVal'),fmt:v=>`${v} mm`},
+  supportWidth:{el:document.getElementById('supportWidth'),vEl:document.getElementById('supportWidthVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+  bottomHoleDiam:{el:document.getElementById('bottomHoleDiam'),vEl:document.getElementById('bottomHoleDiamVal'),fmt:v=>`${v} mm`},
+  bottomThickness:{el:document.getElementById('bottomThickness'),vEl:document.getElementById('bottomThicknessVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+};
+
+let uploadedFile=null,profileFile=null,imageData=null,profileData=null,previewMesh=null,debounce=null;
+
+// ── Three.js ──
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x0a0e1a);
+const camera=new THREE.PerspectiveCamera(45,1,.1,5000); camera.position.set(0,180,250);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+viewport.appendChild(renderer.domElement);
+const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.target.set(0,40,0);
+
+const ptLight=new THREE.PointLight(0xfff4e0,6,2000,.3); ptLight.castShadow=true;
+ptLight.shadow.mapSize.set(4096,4096); ptLight.shadow.camera.near=10; ptLight.shadow.camera.far=400; ptLight.shadow.radius=1.5;
+scene.add(ptLight);
+const ambLight=new THREE.AmbientLight(0x334466,.4); scene.add(ambLight);
+const bulb=new THREE.Mesh(new THREE.SphereGeometry(2,12,12),new THREE.MeshBasicMaterial({color:0xfff4e0})); scene.add(bulb);
+const floorMesh=new THREE.Mesh(new THREE.PlaneGeometry(800,800),new THREE.MeshStandardMaterial({color:0xffffff,roughness:.8,metalness:.1}));
+floorMesh.rotation.x=-Math.PI/2; floorMesh.receiveShadow=true; scene.add(floorMesh);
+const wallMat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:.9,metalness:.1,side:THREE.BackSide});
+const wallMesh=new THREE.Mesh(new THREE.CylinderGeometry(300,300,400,64),wallMat); wallMesh.position.y=100; wallMesh.receiveShadow=true; scene.add(wallMesh);
+scene.add(new THREE.GridHelper(800,40,0x1a2440,0x111827));
+
+function updateLightPos(){const bH=+S.bulbHeight.el.value,br=+S.brightness.el.value;ptLight.position.set(0,bH,0);ptLight.intensity=br*2;ptLight.distance=600+br*200;ambLight.intensity=.2+br*.08;bulb.position.copy(ptLight.position);bulb.scale.setScalar(.5+br*.3)}
+updateLightPos();
+
+function resize(){const w=viewport.clientWidth,h=viewport.clientHeight;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h)}
+resize(); window.addEventListener('resize',resize);
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera)})();
+
+// ── Upload ──
+shapeCylinder.addEventListener('change',()=>{profileZone.style.display='none';scheduleUpdate()});
+shapeCustom.addEventListener('change',()=>{profileZone.style.display=''});
+
+function setupUpload(zone,input,cb){
+  zone.addEventListener('click',()=>input.click());
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('drag-over')});
+  zone.addEventListener('dragleave',()=>zone.classList.remove('drag-over'));
+  zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('drag-over');if(e.dataTransfer.files.length)processFile(e.dataTransfer.files[0],cb)});
+  input.addEventListener('change',()=>{if(input.files.length)processFile(input.files[0],cb)});
+}
+function processFile(f,cb){const r=new FileReader();r.onload=e=>cb(f,e.target.result);r.readAsDataURL(f)}
+function showThumb(z,src){z.innerHTML='';const img=document.createElement('img');img.src=src;z.appendChild(img);z.classList.add('has-image')}
+function loadGrayscale(url,cb){
+  const img=new Image();img.onload=()=>{
+    const s=Math.min(1,1024/Math.max(img.width,img.height));
+    const w=Math.round(img.width*s),h=Math.round(img.height*s);
+    const c=document.createElement('canvas');c.width=w;c.height=h;
+    const ctx=c.getContext('2d');ctx.drawImage(img,0,0,w,h);
+    const px=ctx.getImageData(0,0,w,h).data;const gray=new Uint8Array(w*h);
+    for(let i=0;i<gray.length;i++)gray[i]=Math.round(.299*px[i*4]+.587*px[i*4+1]+.114*px[i*4+2]);
+    cb(w,h,gray)};img.src=url;
+}
+setupUpload(uploadZone,fileInput,(f,url)=>{uploadedFile=f;showThumb(uploadZone,url);loadGrayscale(url,(w,h,g)=>{imageData={width:w,height:h,data:g};downloadBtn.disabled=false;setStatus('ready',`Image loaded: ${w}×${h}`);scheduleUpdate()})});
+setupUpload(profileZone,profileInput,(f,url)=>{profileFile=f;showThumb(profileZone,url);loadGrayscale(url,(w,h,g)=>{profileData=extractProfile(w,h,g);setStatus('ready','Custom profile loaded');scheduleUpdate()})});
+
+function bilinearSample(gray,W,H,u,v){const uc=Math.max(0,Math.min(u,W-1.001)),vc=Math.max(0,Math.min(v,H-1.001));const u0=Math.floor(uc),v0=Math.floor(vc),u1=Math.min(u0+1,W-1),v1=Math.min(v0+1,H-1);const fu=uc-u0,fv=vc-v0;return gray[v0*W+u0]*(1-fu)*(1-fv)+gray[v0*W+u1]*fu*(1-fv)+gray[v1*W+u0]*(1-fu)*fv+gray[v1*W+u1]*fu*fv}
+function extractProfile(w,h,gray){const cx=w>>1,r=new Float32Array(h);for(let y=0;y<h;y++){let mx=0;for(let x=0;x<w;x++)if(gray[y*w+x]<128)mx=Math.max(mx,Math.abs(x-cx));r[y]=mx}let m=0;for(let i=0;i<h;i++)m=Math.max(m,r[i]);if(m>0)for(let i=0;i<h;i++)r[i]/=m;r.reverse();return r}
+
+// ── Common: compute solidGrid + colLimit ──
+function computeGrid(){
+  if(!imageData)return null;
+  const R=+S.diameter.el.value/2, H_s=+S.height.el.value, H=H_s===0?.1:H_s, shadow=+S.shadowSize.el.value;
+  const res=+S.resolution.el.value, nZ=res, nPhi=res, hLight=+S.bulbHeight.el.value;
+  const keepUpper=document.getElementById('upperShell').value==='solid', upperH=+S.upperShellHeight.el.value;
+  const supportCount=+document.getElementById('supportCount').value, supportWidth=+S.supportWidth.el.value;
+  const projMode=document.querySelector('input[name="projMode"]:checked').value;
+  const baseShape=document.getElementById('baseShape').value;
+  let nSides=0;if(baseShape==='triangle')nSides=3;else if(baseShape==='square')nSides=4;else if(baseShape==='pentagon')nSides=5;else if(baseShape==='hexagon')nSides=6;
+  const{width:W,height:IH,data:gray}=imageData, shadowW=shadow, shadowH=shadow*IH/W;
+  const rProfile=new Float32Array(nZ+1);
+  if(shapeCustom.checked&&profileData){for(let i=0;i<=nZ;i++){const t=i/nZ*(profileData.length-1),lo=Math.floor(t),hi=Math.min(lo+1,profileData.length-1);rProfile[i]=R*Math.max(.02,profileData[lo]+(profileData[hi]-profileData[lo])*(t-lo))}}else rProfile.fill(R);
+  const dzStep=H/nZ, dPhi=2*Math.PI/nPhi;
+  // Pass 1: solidGrid
+  const solidGrid=[];
+  for(let i=0;i<nZ;i++){solidGrid[i]=new Uint8Array(nPhi);const zC=(i+.5)*dzStep,rC=(rProfile[i]+rProfile[i+1])/2;
+    for(let j=0;j<nPhi;j++){const phiC=(j+.5)*dPhi;let solid=false;
+      if(projMode==='wall'){solid=bilinearSample(gray,W,IH,(j/nPhi)*W,(1-i/nZ)*IH)<128}
+      else if(zC<hLight-1e-6){const t=hLight/(hLight-zC);let sc=1;if(nSides>=3){const seg=2*Math.PI/nSides;sc=1/Math.cos(((phiC+seg/2)%seg+seg)%seg-seg/2)}const rP=rC*sc,xF=rP*Math.cos(phiC)*t,zF=rP*Math.sin(phiC)*t,uF=(xF/shadowW+.5)*W,vF=(zF/shadowH+.5)*IH;if(uF>=0&&uF<W&&vF>=0&&vF<IH)solid=bilinearSample(gray,W,IH,uF,vF)<128}
+      if(supportCount>0){const as=2*Math.PI/supportCount;for(let k=0;k<supportCount;k++){let d=Math.abs(phiC-k*as);d=Math.min(d,2*Math.PI-d);if(d<supportWidth/2/rC){solid=true;break}}}
+      if(i===0)solid=true;solidGrid[i][j]=solid?1:0}}
+  // Per-column limit
+  const colLimit=new Float32Array(nPhi);
+  if(projMode!=='wall'){for(let j=0;j<nPhi;j++){let topZ=0;for(let i=0;i<nZ;i++){const zC=(i+.5)*dzStep;if(zC<hLight&&solidGrid[i][j])topZ=zC}colLimit[j]=keepUpper?Math.min(topZ+upperH,H):topZ}}else colLimit.fill(H);
+  // Final solid (including upper shell logic)
+  const finalSolid=[];
+  for(let i=0;i<nZ;i++){finalSolid[i]=new Uint8Array(nPhi);const zC=(i+.5)*dzStep;
+    for(let j=0;j<nPhi;j++){let s;if(projMode==='wall')s=!!solidGrid[i][j];else if(zC>=hLight-1e-6)s=zC<colLimit[j];else s=!!solidGrid[i][j];finalSolid[i][j]=s?1:0}}
+  return{finalSolid,nZ,nPhi,R,H,dzStep,dPhi,rProfile,nSides,baseShape,projMode};
+}
+
+// ── Preview (single-sided surface for Three.js) ──
+function buildPreview(){
+  const g=computeGrid();if(!g)return null;
+  const{finalSolid,nZ,nPhi,R,H,dzStep,dPhi,rProfile,nSides}=g;
+  const hasBottom=document.getElementById('bottomStyle').value==='closed';
+  const holeDiam=+S.bottomHoleDiam.el.value, thickness=+S.thickness.el.value, bThick=+S.bottomThickness.el.value;
+  const rHole=Math.min(holeDiam/2,R-2);
+  const numBV=hasBottom?nPhi*4:0;
+  const verts=new Float32Array(((nZ+1)*nPhi+numBV)*3);
+  for(let i=0;i<=nZ;i++){const y=i*dzStep;for(let j=0;j<nPhi;j++){const phi=j*dPhi;let sc=1;if(nSides>=3){const seg=2*Math.PI/nSides;sc=1/Math.cos(((phi+seg/2)%seg+seg)%seg-seg/2)}const r=rProfile[i]*sc,idx=(i*nPhi+j)*3;verts[idx]=r*Math.cos(phi);verts[idx+1]=y;verts[idx+2]=r*Math.sin(phi)}}
+  if(hasBottom){const off=(nZ+1)*nPhi*3;for(let j=0;j<nPhi;j++){const phi=j*dPhi;let sc=1;if(nSides>=3){const seg=2*Math.PI/nSides;sc=1/Math.cos(((phi+seg/2)%seg+seg)%seg-seg/2)}const rI=rProfile[0]*sc,c=Math.cos(phi),s=Math.sin(phi);const b=(0*nPhi+j)*3,t=(1*nPhi+j)*3,hb=(2*nPhi+j)*3,ht=(3*nPhi+j)*3;verts[off+b]=rI*c;verts[off+b+1]=0;verts[off+b+2]=rI*s;verts[off+t]=rI*c;verts[off+t+1]=-bThick;verts[off+t+2]=rI*s;verts[off+hb]=rHole*c;verts[off+hb+1]=0;verts[off+hb+2]=rHole*s;verts[off+ht]=rHole*c;verts[off+ht+1]=-bThick;verts[off+ht+2]=rHole*s}}
+  floorMesh.visible=g.projMode!=='wall';wallMesh.visible=g.projMode==='wall';
+  const indices=[]; let solidN=0,totalN=0;
+  for(let i=0;i<nZ;i++){for(let j=0;j<nPhi;j++){totalN++;if(!finalSolid[i][j])continue;solidN++;const j1=(j+1)%nPhi;indices.push(i*nPhi+j,i*nPhi+j1,(i+1)*nPhi+j1,i*nPhi+j,(i+1)*nPhi+j1,(i+1)*nPhi+j)}}
+  if(hasBottom){const vo=(nZ+1)*nPhi;for(let j=0;j<nPhi;j++){const j1=(j+1)%nPhi;indices.push(vo+j,vo+j1,vo+2*nPhi+j1,vo+j,vo+2*nPhi+j1,vo+2*nPhi+j);indices.push(vo+nPhi+j,vo+3*nPhi+j,vo+3*nPhi+j1,vo+nPhi+j,vo+3*nPhi+j1,vo+nPhi+j1);indices.push(vo+2*nPhi+j,vo+2*nPhi+j1,vo+3*nPhi+j1,vo+2*nPhi+j,vo+3*nPhi+j1,vo+3*nPhi+j)}}
+  const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(verts,3));geo.setIndex(indices);geo.computeVertexNormals();
+  return{geo,solidN,totalN};
+}
+
+function updatePreview(){if(previewMesh){scene.remove(previewMesh);previewMesh.geometry.dispose();previewMesh.material.dispose();previewMesh=null}const r=buildPreview();if(!r)return;previewMesh=new THREE.Mesh(r.geo,new THREE.MeshStandardMaterial({color:0x8090b0,metalness:.3,roughness:.6,side:THREE.DoubleSide}));previewMesh.castShadow=true;previewMesh.receiveShadow=true;scene.add(previewMesh);triCount.textContent=`Faces: ${r.solidN*2} | Holes: ${r.totalN-r.solidN}`;updateLightPos()}
+function scheduleUpdate(){clearTimeout(debounce);debounce=setTimeout(updatePreview,80)}
+
+// ── Slider events ──
+for(const[key,s]of Object.entries(S)){s.el.addEventListener('input',()=>{s.vEl.textContent=s.fmt(s.el.value);if(key==='brightness'||key==='bulbHeight')updateLightPos();if(key!=='brightness')scheduleUpdate()})}
+function updateVisibility(){
+  const ush=document.getElementById('upperShell').value,pm=document.querySelector('input[name="projMode"]:checked').value;
+  document.getElementById('upperShellHeightRow').style.display=ush==='solid'&&pm==='floor'?'':'none';
+  const bs=document.getElementById('bottomStyle').value;
+  document.getElementById('bottomHoleRow').style.display=bs==='closed'?'':'none';
+  document.getElementById('bottomThicknessRow').style.display=bs==='closed'?'':'none';
+}
+updateVisibility();
+for(const r of document.querySelectorAll('input[name="projMode"]'))r.addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('baseShape').addEventListener('change',scheduleUpdate);
+document.getElementById('upperShell').addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('bottomStyle').addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('supportCount').addEventListener('change',scheduleUpdate);
+
+// ══════════════════════════════════════════════════════════════
+// STL Generation — pure JS, watertight solid shell
+// ══════════════════════════════════════════════════════════════
+function generateSTL(){
+  const g=computeGrid();if(!g)return null;
+  const{finalSolid,nZ,nPhi,R,H,dzStep,dPhi,rProfile,nSides}=g;
+  const thickness=+S.thickness.el.value;
+  const hasBottom=document.getElementById('bottomStyle').value==='closed';
+  const bThick=+S.bottomThickness.el.value;
+  const holeDiam=+S.bottomHoleDiam.el.value;
+  const holeR=hasBottom?Math.max(0,Math.min(holeDiam/2,R-2)):0;
+
+  function polyScale(phi){if(nSides<3)return 1;const seg=2*Math.PI/nSides;return 1/Math.cos(((phi+seg/2)%seg+seg)%seg-seg/2)}
+
+  // Build inner+outer vertex grids [i][j] = [x,y,z] (Y-up for consistency)
+  const outer=[],inner=[];
+  for(let i=0;i<=nZ;i++){outer[i]=[];inner[i]=[];const y=i*dzStep;
+    for(let j=0;j<nPhi;j++){const phi=j*dPhi,sc=polyScale(phi),rIn=rProfile[i]*sc,rOut=(rProfile[i]+thickness)*sc,c=Math.cos(phi),s=Math.sin(phi);
+      outer[i][j]=[rOut*c,y,rOut*s];inner[i][j]=[rIn*c,y,rIn*s]}}
+
+  const tris=[];
+  function tri(a,b,c){tris.push(a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2])}
+  function quad(a,b,c,d){tri(a,b,c);tri(a,c,d)} // a-b-c-d CCW
+
+  for(let i=0;i<nZ;i++){for(let j=0;j<nPhi;j++){
+    if(!finalSolid[i][j])continue;
+    const j1=(j+1)%nPhi;
+    // Outer face (outward normal)
+    quad(outer[i][j],outer[i][j1],outer[i+1][j1],outer[i+1][j]);
+    // Inner face (inward normal)
+    quad(inner[i][j],inner[i+1][j],inner[i+1][j1],inner[i][j1]);
+    // Boundary caps
+    const jm1=(j-1+nPhi)%nPhi;
+    // Bottom edge
+    if(i===0&&!hasBottom || i>0&&!finalSolid[i-1][j]){quad(outer[i][j],outer[i][j1],inner[i][j1],inner[i][j]); /* flip */ }
+    if(i===0&&!hasBottom){quad(inner[i][j],inner[i][j1],outer[i][j1],outer[i][j])}
+    else if(i>0&&!finalSolid[i-1][j]){quad(inner[i][j],inner[i][j1],outer[i][j1],outer[i][j])}
+    // Top edge
+    if(i===nZ-1||!finalSolid[i+1]||!finalSolid[i+1][j]){quad(outer[i+1][j],inner[i+1][j],inner[i+1][j1],outer[i+1][j1])}
+    // Left phi edge
+    if(!finalSolid[i][jm1]){quad(outer[i][j],inner[i][j],inner[i+1][j],outer[i+1][j])}
+    // Right phi edge
+    if(!finalSolid[i][j1]){quad(outer[i][j1],outer[i+1][j1],inner[i+1][j1],inner[i][j1])}
+  }}
+
+  // Bottom plate
+  if(hasBottom){
+    // Annular ring vertices at y=0 and y=-bThick
+    for(let j=0;j<nPhi;j++){
+      const j1=(j+1)%nPhi, phi0=j*dPhi, phi1=j1*dPhi;
+      const sc0=polyScale(phi0), sc1=polyScale(phi1);
+      const rOut0=(rProfile[0]+thickness)*sc0, rOut1=(rProfile[0]+thickness)*sc1;
+      const c0=Math.cos(phi0),s0=Math.sin(phi0),c1=Math.cos(phi1),s1=Math.sin(phi1);
+      // Outer wall of plate
+      const oT0=[rOut0*c0,0,rOut0*s0], oT1=[rOut1*c1,0,rOut1*s1];
+      const oB0=[rOut0*c0,-bThick,rOut0*s0], oB1=[rOut1*c1,-bThick,rOut1*s1];
+      quad(oT0,oB0,oB1,oT1); // outer wall faces outward
+      // Inner hole wall
+      if(holeR>0){
+        const hT0=[holeR*c0,0,holeR*s0],hT1=[holeR*c1,0,holeR*s1];
+        const hB0=[holeR*c0,-bThick,holeR*s0],hB1=[holeR*c1,-bThick,holeR*s1];
+        quad(hT0,hT1,hB1,hB0); // hole wall faces inward
+      }
+      // Top disc (y=0): annulus from holeR to Rout
+      const iT0=holeR>0?[holeR*c0,0,holeR*s0]:[0,0,0];
+      const iT1=holeR>0?[holeR*c1,0,holeR*s1]:[0,0,0];
+      quad(iT0,oT0,oT1,iT1); // top face up
+      // Bottom disc (y=-bThick)
+      const iB0=holeR>0?[holeR*c0,-bThick,holeR*s0]:[0,-bThick,0];
+      const iB1=holeR>0?[holeR*c1,-bThick,holeR*s1]:[0,-bThick,0];
+      quad(iB0,iB1,oB1,oB0); // bottom face down
+    }
+  }
+
+  // Pack binary STL
+  const nTri=tris.length/9;
+  const buf=new ArrayBuffer(84+nTri*50);
+  const dv=new DataView(buf);
+  // Header
+  const hdr='Shadow Lamp Generator - github.com/niceinacubicle';
+  for(let i=0;i<80;i++)dv.setUint8(i,i<hdr.length?hdr.charCodeAt(i):0);
+  dv.setUint32(80,nTri,true);
+  let off=84;
+  for(let t=0;t<nTri;t++){
+    const b=t*9;
+    const ax=tris[b],ay=tris[b+1],az=tris[b+2];
+    const bx=tris[b+3],by=tris[b+4],bz=tris[b+5];
+    const cx=tris[b+6],cy=tris[b+7],cz=tris[b+8];
+    // Normal = (B-A) × (C-A)
+    const abx=bx-ax,aby=by-ay,abz=bz-az;
+    const acx=cx-ax,acy=cy-ay,acz=cz-az;
+    let nx=aby*acz-abz*acy, ny=abz*acx-abx*acz, nz=abx*acy-aby*acx;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(len>0){nx/=len;ny/=len;nz/=len}
+    dv.setFloat32(off,nx,true);off+=4;dv.setFloat32(off,ny,true);off+=4;dv.setFloat32(off,nz,true);off+=4;
+    dv.setFloat32(off,ax,true);off+=4;dv.setFloat32(off,ay,true);off+=4;dv.setFloat32(off,az,true);off+=4;
+    dv.setFloat32(off,bx,true);off+=4;dv.setFloat32(off,by,true);off+=4;dv.setFloat32(off,bz,true);off+=4;
+    dv.setFloat32(off,cx,true);off+=4;dv.setFloat32(off,cy,true);off+=4;dv.setFloat32(off,cz,true);off+=4;
+    dv.setUint16(off,0,true);off+=2;
+  }
+  return{blob:new Blob([buf],{type:'application/octet-stream'}),nTri};
+}
+
+// ── Download ──
+downloadBtn.addEventListener('click',()=>{
+  if(!imageData)return;
+  showLoading('Generating STL — please wait…');downloadBtn.disabled=true;
+  setTimeout(()=>{
+    try{
+      const result=generateSTL();
+      if(!result)throw new Error('No image data');
+      const a=document.createElement('a');a.href=URL.createObjectURL(result.blob);
+      a.download='shadow_lamp.stl';a.click();URL.revokeObjectURL(a.href);
+      setStatus('ready',`STL downloaded ✓ (${result.nTri.toLocaleString()} triangles)`);
+    }catch(e){setStatus('error','Error: '+e.message)}
+    finally{hideLoading();downloadBtn.disabled=false}
+  },50);
+});
+
+// ── Reset ──
+resetBtn.addEventListener('click',()=>{
+  uploadedFile=profileFile=imageData=profileData=null;downloadBtn.disabled=true;fileInput.value='';profileInput.value='';
+  [uploadZone,profileZone].forEach((z,i)=>{const l=i===0?['🌗','Drop silhouette image here','PNG / JPG — black & white']:['🏺','Drop profile side-view','Black silhouette on white'];z.innerHTML=`<div class="icon">${l[0]}</div><div class="label">${l[1]}</div><div class="sublabel">${l[2]}</div>`;z.classList.remove('has-image')});
+  if(previewMesh){scene.remove(previewMesh);previewMesh.geometry.dispose();previewMesh.material.dispose();previewMesh=null}
+  triCount.textContent='Faces: —';setStatus('','No image loaded');
+});
+
+function setStatus(s,t){statusDot.className='status-dot '+s;statusText.textContent=t}
+function showLoading(t){loadingTextEl.textContent=t;loadingOverlay.classList.add('visible')}
+function hideLoading(){loadingOverlay.classList.remove('visible')}
+  </script>
+</body>
+</html>
