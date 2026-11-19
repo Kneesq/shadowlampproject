@@ -354,8 +354,7 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
                 if active.any():
                     phi_q = phi_2d[active]
                     vals = interp(zv, phi_q, grid=False).astype(np.float32)
-                    v_slice = volume[:, :, k]
-                    v_slice[active] = np.maximum(v_slice[active], wall_field[active] * vals)
+                    volume[:, :, k][active] = np.maximum(volume[:, :, k][active], wall_field[active] * vals)
 
         if roof_height and body_top - min_wall <= zv <= apex:
             # Hollow cone joined to the upper rim, with a solid tip for the hook.
@@ -375,22 +374,27 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
     # Marching cubes
     print(f"  Marching cubes...")
     t0 = time.time()
-    verts, faces, _, _ = marching_cubes(
+    verts, faces = marching_cubes(
         volume, level=0.5,
-        spacing=(voxel_size, voxel_size, z_step), allow_degenerate=False)
+        spacing=(voxel_size, voxel_size, z_step), allow_degenerate=False)[:2]
+    del volume
     verts += [x[0], y[0], z[0]]
     # Flip Y axis to match Three.js preview (Y-up vs Z-up handedness)
     verts[:, 1] = -verts[:, 1]
     dt = time.time() - t0
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-    mesh.merge_vertices()
+    del verts, faces
     # An ambiguous voxel near the stencil edge can create a separate, sub-voxel
     # octahedron. Remove only tiny disconnected components, never a thin limb
     # connected to the main silhouette or a distinct full-size design element.
-    edges = mesh.edges_unique
-    graph = coo_matrix((np.ones(len(edges), dtype=np.uint8), edges.T),
+    # Two sides of each triangle suffice to find connected vertices; no
+    # globally sorted table of unique mesh edges is needed for this check.
+    rows = np.repeat(mesh.faces[:, 0], 2)
+    cols = mesh.faces[:, 1:].reshape(-1)
+    graph = coo_matrix((np.ones(len(rows), dtype=bool), (rows, cols)),
                        shape=(len(mesh.vertices), len(mesh.vertices)))
+    del rows, cols
     count, labels = connected_components(graph, directed=False)
     if count > 1:
         face_labels = labels[mesh.faces[:, 0]]
@@ -409,8 +413,8 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
             if keep.any() and not keep.all():
                 mesh.update_faces(keep)
                 mesh.remove_unreferenced_vertices()
-    del graph, edges
-    if mesh.volume < 0:
+    del graph, labels
+    if signed_volume(mesh.vertices, mesh.faces) < 0:
         mesh.invert()
 
     if not mesh.is_watertight:
@@ -419,18 +423,39 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
 
     print(f"  Raw: {len(mesh.faces)} faces ({dt:.1f}s)  "
           f"Watertight: {mesh.is_watertight}")
-    return mesh
+    # The next stage only needs the finished triangles. Drop the raw mesh's
+    # transient edge/topology caches before allocating the smoothing operator.
+    return trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
 
 
 # ================================================================
 # Post-processing: Smooth + Decimate
 # ================================================================
 
+def signed_volume(vertices, faces):
+    """Oriented tetrahedral volume without allocating the full triangle soup."""
+    total = 0.0
+    for start in range(0, len(faces), 32768):
+        a, b, c = vertices[faces[start:start + 32768]].transpose(1, 0, 2)
+        total += np.einsum('ij,ij->', a, np.cross(b, c))
+    return total / 6
+
+
 def smooth_and_decimate(mesh, target_faces=300000, smooth_iter=2):
     """Laplacian smoothing (removes voxel staircase) + quadric decimation."""
     if smooth_iter > 0:
         print(f"  Laplacian smoothing ({smooth_iter} iter)...")
-        trimesh.smoothing.filter_laplacian(mesh, iterations=smooth_iter)
+        averaging = trimesh.smoothing.laplacian_calculation(mesh).tocsr()
+        vertices = np.array(mesh.vertices)
+        initial_volume = signed_volume(vertices, mesh.faces)
+        for _ in range(smooth_iter):
+            vertices += .5 * (averaging @ vertices - vertices)
+            # Preserve the same enclosed volume after each Laplacian pass.
+            smoothed_volume = signed_volume(vertices, mesh.faces)
+            if smoothed_volume:
+                vertices *= np.cbrt(initial_volume / smoothed_volume)
+        mesh.vertices = vertices
+        del averaging, vertices
 
     n = len(mesh.faces)
     if n > target_faces:
@@ -443,10 +468,12 @@ def smooth_and_decimate(mesh, target_faces=300000, smooth_iter=2):
         # a quadric collapse can merge distinct sides of a narrow cut.
         candidate = trimesh.Trimesh(vertices=verts_out.astype(np.float32), faces=faces_out,
                                     validate=True)
-        if candidate.is_watertight and candidate.is_winding_consistent and candidate.volume > 0:
-            mesh = candidate
-        else:
-            print("  Retaining the full mesh to preserve closed contours.")
+        if (candidate.is_watertight and candidate.is_winding_consistent
+                and signed_volume(candidate.vertices, candidate.faces) > 0):
+            print(f"  Final: {len(candidate.faces)} faces  Watertight: True")
+            return candidate
+        del candidate, verts_out, faces_out
+        print("  Retaining the full mesh to preserve closed contours.")
 
     # Weld at export precision before verifying the actual STL topology.
     mesh = trimesh.Trimesh(vertices=mesh.vertices.astype(np.float32), faces=mesh.faces,

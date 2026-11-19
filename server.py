@@ -6,14 +6,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-import numpy as np
-from PIL import Image, UnidentifiedImageError
 from flask import Flask, jsonify, request, send_from_directory
-
-from shadow_lamp_v2 import (
-    build_cylinder_mask, build_manifold_mesh, extract_profile,
-    load_and_binarize, smooth_and_decimate, upper_shell_start,
-)
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 _export_session = tempfile.TemporaryDirectory(prefix='shadow-lamp-exports-', ignore_cleanup_errors=True)
@@ -48,6 +41,8 @@ def enabled(name, default=False):
 
 
 def normalized_radii(name, size=None):
+    import numpy as np
+
     values = np.asarray(json.loads(request.form[name]), dtype=np.float64)
     if (values.ndim != 1 or not 2 <= len(values) <= 16384 or
             (size and len(values) != size) or not np.isfinite(values).all()
@@ -60,6 +55,17 @@ def normalized_radii(name, size=None):
 def generate():
     if 'image' not in request.files and 'silhouette_mask' not in request.files:
         return jsonify(error='No image uploaded'), 400
+    # Browsing and previewing only need Flask. Load the mesh engine on first export.
+    try:
+        import numpy as np
+        from PIL import Image, UnidentifiedImageError
+        from shadow_lamp_v2 import (
+            build_cylinder_mask, build_manifold_mesh, extract_profile,
+            load_and_binarize, smooth_and_decimate, upper_shell_start,
+        )
+    except ImportError as error:
+        return jsonify(error=f'STL export requires the packages in requirements.txt ({error}).'), 503
+
     try:
         radius = number('radius', 50, 1, 100)
         height = max(.1, number('height', 100, 0, 300))

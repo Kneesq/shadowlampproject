@@ -1379,12 +1379,18 @@ function samplePreviewImage(data, width, height, u, v, wrap) {
   return upper * (1 - dy) + lower * dy;
 }
 
-function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors, caps) {
+function contourPreviewGeometry(field, rows, columns, writeVertex, capVertexCount, writeCaps) {
   const nodeCount = field.length;
   const cells = new Uint8Array(rows * columns);
   const facesForCase = [0, 1, 1, 2, 1, 4, 2, 3, 1, 2, 4, 3, 2, 3, 3, 2];
-  let indexCount = caps.length;
-  let solidN = 0;
+  const gridIds = new Int32Array(nodeCount);
+  let solidVertices = 0;
+  for (let node = 0; node < nodeCount; node++) {
+    if (field[node] > 0) gridIds[node] = solidVertices++;
+  }
+
+  let indexCount = 0;
+  let crossings = 0;
   for (let row = 0; row < rows; row++) {
     const offset = row * columns;
     for (let col = 0; col < columns; col++) {
@@ -1392,7 +1398,13 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
       const topRight = offset + (col + 1) % columns;
       const a = field[topLeft], b = field[topRight];
       const c = field[topRight + columns], d = field[topLeft + columns];
-      const solid = (a > 0 ? 1 : 0) | (b > 0 ? 2 : 0) | (c > 0 ? 4 : 0) | (d > 0 ? 8 : 0);
+      const aInside = a > 0, bInside = b > 0, cInside = c > 0, dInside = d > 0;
+      // Count each angular/vertical edge once, including the last ring.
+      if (aInside !== bInside) crossings++;
+      if (aInside !== dInside) crossings++;
+      if (row === rows - 1 && cInside !== dInside) crossings++;
+
+      const solid = (aInside ? 1 : 0) | (bInside ? 2 : 0) | (cInside ? 4 : 0) | (dInside ? 8 : 0);
       if (!solid) continue;
 
       // Resolve checkerboard cells from the signed saddle, rather than joining two tips.
@@ -1400,42 +1412,56 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
       const separate = (solid === 5 && saddle <= 0) || (solid === 10 && saddle >= 0);
       cells[topLeft] = solid | (separate ? 16 : 0);
       indexCount += 3 * (separate ? 2 : facesForCase[solid]);
-      solidN++;
     }
   }
 
-  const indices = new Uint32Array(indexCount);
+  const vertexCount = solidVertices + capVertexCount + crossings;
+  const positions = new Float32Array(vertexCount * 3);
+  const colors = new Float32Array(positions.length);
+  for (let row = 0; row <= rows; row++) {
+    for (let col = 0; col < columns; col++) {
+      const node = row * columns + col;
+      if (field[node] > 0) writeVertex(row, col, positions, colors, gridIds[node] * 3);
+    }
+  }
+
+  const caps = writeCaps(positions, colors, solidVertices, gridIds);
+  // WebGL 2 reserves index 65535 for primitive restart.
+  const IndexArray = vertexCount <= 65535 ? Uint16Array : Uint32Array;
+  const indices = new IndexArray(caps.length + indexCount);
   indices.set(caps);
   let cursor = caps.length;
-  const edgeVertices = new Int32Array(nodeCount * 2).fill(-1);
-  const vertexOffset = gridPositions.length / 3;
-  let extraPositions = new Float32Array(columns * 12);
-  let extraColors = new Float32Array(extraPositions.length);
-  let extraCount = 0;
+  let nextVertex = solidVertices + capVertexCount;
+  const edgeVertices = crossings ? new Uint32Array(nodeCount * 2) : null;
+  const emptyPosition = new Float32Array(3);
+  const emptyColor = new Float32Array(3);
 
   function crossing(key, a, b) {
-    if (edgeVertices[key] >= 0) return edgeVertices[key];
-    if (extraCount === extraPositions.length) {
-      const positions = new Float32Array(extraCount * 2);
-      const colors = new Float32Array(positions.length);
-      positions.set(extraPositions);
-      colors.set(extraColors);
-      extraPositions = positions;
-      extraColors = colors;
-    }
-    const id = vertexOffset + extraCount / 3;
+    const cached = edgeVertices[key];
+    if (cached) return cached - 1;
+
+    const keepFirst = field[a] > 0;
+    const empty = keepFirst ? b : a;
+    const solid = gridIds[keepFirst ? a : b] * 3;
+    // Reproduce the lattice's Float32 coordinates before interpolating.
+    writeVertex(Math.floor(empty / columns), empty % columns, emptyPosition, emptyColor, 0);
     const t = field[a] / (field[a] - field[b]);
-    for (let axis = 0; axis < 3; axis++, extraCount++) {
-      const p = a * 3 + axis, q = b * 3 + axis;
-      extraPositions[extraCount] = gridPositions[p] + (gridPositions[q] - gridPositions[p]) * t;
-      extraColors[extraCount] = gridColors[p] + (gridColors[q] - gridColors[p]) * t;
+    const id = nextVertex++;
+    for (let axis = 0; axis < 3; axis++) {
+      const p = keepFirst ? positions[solid + axis] : emptyPosition[axis];
+      const q = keepFirst ? emptyPosition[axis] : positions[solid + axis];
+      const startColor = keepFirst ? colors[solid + axis] : emptyColor[axis];
+      const endColor = keepFirst ? emptyColor[axis] : colors[solid + axis];
+      positions[id * 3 + axis] = p + (q - p) * t;
+      colors[id * 3 + axis] = startColor + (endColor - startColor) * t;
     }
-    edgeVertices[key] = id;
+    edgeVertices[key] = id + 1;
     return id;
   }
 
   const corners = new Int32Array(4);
   const polygon = new Int32Array(6);
+  const edgeKeys = new Int32Array(4);
   for (let row = 0; row < rows; row++) {
     const offset = row * columns;
     for (let col = 0; col < columns; col++) {
@@ -1445,12 +1471,12 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
       const b = offset + (col + 1) % columns;
       const c = b + columns, d = a + columns;
       if (code === 15) {
-        indices[cursor++] = a;
-        indices[cursor++] = c;
-        indices[cursor++] = b;
-        indices[cursor++] = a;
-        indices[cursor++] = d;
-        indices[cursor++] = c;
+        indices[cursor++] = gridIds[a];
+        indices[cursor++] = gridIds[c];
+        indices[cursor++] = gridIds[b];
+        indices[cursor++] = gridIds[a];
+        indices[cursor++] = gridIds[d];
+        indices[cursor++] = gridIds[c];
         continue;
       }
 
@@ -1459,12 +1485,15 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
       corners[1] = b;
       corners[2] = c;
       corners[3] = d;
-      const edgeKeys = [a, nodeCount + b, d, nodeCount + a];
+      edgeKeys[0] = a;
+      edgeKeys[1] = nodeCount + b;
+      edgeKeys[2] = d;
+      edgeKeys[3] = nodeCount + a;
       if (code & 16) {
         for (let corner = solid === 5 ? 0 : 1; corner < 4; corner += 2) {
           const previous = (corner + 3) % 4;
           const next = (corner + 1) % 4;
-          indices[cursor++] = corners[corner];
+          indices[cursor++] = gridIds[corners[corner]];
           indices[cursor++] = crossing(edgeKeys[previous], corners[previous], corners[corner]);
           indices[cursor++] = crossing(edgeKeys[corner], corners[corner], corners[next]);
         }
@@ -1475,7 +1504,7 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
       for (let corner = 0; corner < 4; corner++) {
         const next = (corner + 1) % 4;
         const inside = !!(solid & (1 << corner));
-        if (inside) polygon[count++] = corners[corner];
+        if (inside) polygon[count++] = gridIds[corners[corner]];
         if (inside !== !!(solid & (1 << next))) {
           polygon[count++] = crossing(edgeKeys[corner], corners[corner], corners[next]);
         }
@@ -1488,18 +1517,12 @@ function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors,
     }
   }
 
-  const positions = new Float32Array(gridPositions.length + extraCount);
-  const colors = new Float32Array(positions.length);
-  positions.set(gridPositions);
-  positions.set(extraPositions.subarray(0, extraCount), gridPositions.length);
-  colors.set(gridColors);
-  colors.set(extraColors.subarray(0, extraCount), gridColors.length);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
-  return { geo: geometry, solidN, totalN: cells.length };
+  return geometry;
 }
 
 function reliefSuppliesProjection() {
@@ -1583,7 +1606,8 @@ function buildPreview() {
   const shadowHeight = shadowWidth * imageHeight / width;
   const nodeCount = (rows + 1) * columns;
   const field = new Float32Array(nodeCount);
-  const horizontal = new Float32Array(nodeCount);
+  const projectionRow = new Float32Array(columns);
+  const previousRow = new Float32Array(columns);
   const wallMaskHeight = hasHood ? lowerHeight : height;
   for (let row = 0; row <= rows; row++) {
     const y = row * rowHeight;
@@ -1606,23 +1630,25 @@ function buildPreview() {
           mask = Math.min(margin, (128 - samplePreviewImage(data, width, imageHeight, u - 0.5, v - 0.5, false)) / 128);
         }
       }
-      field[offset + col] = mask;
+      projectionRow[col] = mask;
     }
 
     // Separate, periodic blur passes round contour samples without a seam.
     for (let col = 0; col < columns; col++) {
       const left = (col + columns - 1) % columns;
       const right = (col + 1) % columns;
-      horizontal[offset + col] = (field[offset + left] + 2 * field[offset + col] + field[offset + right]) / 4;
+      field[offset + col] = (projectionRow[left] + 2 * projectionRow[col] + projectionRow[right]) / 4;
     }
   }
+  previousRow.set(field.subarray(0, columns));
   for (let row = 0; row <= rows; row++) {
     const offset = row * columns;
-    const below = Math.max(0, row - 1) * columns;
     const above = Math.min(rows, row + 1) * columns;
     const y = row * rowHeight;
     for (let col = 0; col < columns; col++) {
-      let mask = (horizontal[below + col] + 2 * horizontal[offset + col] + horizontal[above + col]) / 4;
+      const center = field[offset + col];
+      let mask = (previousRow[col] + 2 * center + field[above + col]) / 4;
+      previousRow[col] = center;
       if (!wall && y >= lightHeight) mask = -1;
       if (hasHood && y >= hoodStart) mask = 1;
       if (supportCount) {
@@ -1635,11 +1661,9 @@ function buildPreview() {
   }
 
   const yApex = height + (hasHood ? lantern ? 10 : 5 : 0);
-  const plateVertices = plateThickness ? 5 * columns + 2 : 0;
-  const vertexCount = nodeCount + plateVertices + (hasHood ? 1 : 0);
-  const positions = new Float32Array(vertexCount * 3);
-  const colors = new Float32Array(positions.length);
-  const caps = [];
+  const holeRadius = Math.max(0, Math.min(Number(S.bottomHoleDiam.el.value) / 2, radii[0] * minimumScale - 0.1));
+  const plateVertices = plateThickness ? (holeRadius ? 5 * columns : 3 * columns + 2) : 0;
+  const capVertices = plateVertices + (hasHood ? 1 : 0);
   const litho = lantern && lithoEnable?.checked && lithoData;
   const minLitho = Number(lithoMinThick?.value ?? 1.2);
   const maxLitho = Number(lithoMaxThick?.value ?? 3);
@@ -1648,89 +1672,90 @@ function buildPreview() {
   const baseColor = [0.42, 0.48, 0.58];
   const hoodColor = [0.94, 0.94, 0.96];
 
-  for (let row = 0; row <= rows; row++) {
+  function writeVertex(row, col, positions, colors, index) {
     const y = row * rowHeight;
     const upper = hasHood && y >= hoodStart - 1e-4;
-    const reliefRow = upper && litho && hoodHeight > 0;
-    const lithoY = reliefRow
-      ? (1 - Math.max(0, Math.min(1, (y - hoodStart) / hoodHeight))) * (litho.height - 1)
-      : 0;
-    for (let col = 0; col < columns; col++) {
-      const index = (row * columns + col) * 3;
-      let thickness = wallThickness;
-      let [red, green, blue] = upper ? hoodColor : baseColor;
-      if (reliefRow) {
-        const u = col / columns * repeatLitho * litho.width - 0.5;
-        const gray = samplePreviewImage(litho.data, litho.width, litho.height, u, lithoY, true) / 255;
-        const darkness = invertLitho ? gray : 1 - gray;
-        thickness = minLitho + darkness * (maxLitho - minLitho);
-        red = 1 - darkness * 0.58;
-        green = 0.97 - darkness * 0.64;
-        blue = 0.91 - darkness * 0.69;
-      }
-      const r = (radii[row] + thickness) * scales[col];
-      positions[index] = r * cosines[col];
-      positions[index + 1] = y;
-      positions[index + 2] = r * sines[col];
-      colors[index] = red;
-      colors[index + 1] = green;
-      colors[index + 2] = blue;
+    let thickness = wallThickness;
+    let [red, green, blue] = upper ? hoodColor : baseColor;
+    if (upper && litho && hoodHeight > 0) {
+      const u = col / columns * repeatLitho * litho.width - 0.5;
+      const v = (1 - Math.max(0, Math.min(1, (y - hoodStart) / hoodHeight))) * (litho.height - 1);
+      const gray = samplePreviewImage(litho.data, litho.width, litho.height, u, v, true) / 255;
+      const darkness = invertLitho ? gray : 1 - gray;
+      thickness = minLitho + darkness * (maxLitho - minLitho);
+      red = 1 - darkness * 0.58;
+      green = 0.97 - darkness * 0.64;
+      blue = 0.91 - darkness * 0.69;
     }
+    const r = (radii[row] + thickness) * scales[col];
+    positions[index] = r * cosines[col];
+    positions[index + 1] = y;
+    positions[index + 2] = r * sines[col];
+    colors[index] = red;
+    colors[index + 1] = green;
+    colors[index + 2] = blue;
   }
 
-  if (plateThickness) {
-    const holeRadius = Math.max(0, Math.min(Number(S.bottomHoleDiam.el.value) / 2, radii[0] * minimumScale - 0.1));
-    function plateVertex(id, r, y, col) {
-      positions[id * 3] = r * cosines[col];
-      positions[id * 3 + 1] = y;
-      positions[id * 3 + 2] = r * sines[col];
-      colors.set(baseColor, id * 3);
-    }
+  function writeCaps(positions, colors, capStart, gridIds) {
+    const caps = [];
+    if (plateThickness) {
+      function plateVertex(id, r, y, col) {
+        positions[id * 3] = r * cosines[col];
+        positions[id * 3 + 1] = y;
+        positions[id * 3 + 2] = r * sines[col];
+        colors.set(baseColor, id * 3);
+      }
 
-    const bottom = nodeCount;
-    const outerTop = bottom + columns;
-    const plateTop = outerTop + columns;
-    const holeBottom = plateTop + columns;
-    const holeTop = holeBottom + columns;
-    const topCenter = holeTop + columns;
-    const bottomCenter = topCenter + 1;
-    plateVertex(topCenter, 0, 0, 0);
-    plateVertex(bottomCenter, 0, -plateThickness, 0);
-    for (let col = 0; col < columns; col++) {
-      const next = (col + 1) % columns;
-      const outer = (radii[0] + wallThickness) * scales[col];
-      plateVertex(bottom + col, outer, -plateThickness, col);
-      plateVertex(outerTop + col, outer, 0, col);
-      plateVertex(plateTop + col, outer, 0, col);
-      caps.push(outerTop + col, outerTop + next, bottom + next, outerTop + col, bottom + next, bottom + col);
-      if (holeRadius) {
-        plateVertex(holeBottom + col, holeRadius, -plateThickness, col);
-        plateVertex(holeTop + col, holeRadius, 0, col);
-        caps.push(
-          plateTop + col, holeTop + col, holeTop + next, plateTop + col, holeTop + next, plateTop + next,
-          bottom + col, bottom + next, holeBottom + next, bottom + col, holeBottom + next, holeBottom + col,
-          holeTop + col, holeBottom + col, holeBottom + next, holeTop + col, holeBottom + next, holeTop + next,
-        );
-      } else {
-        caps.push(plateTop + col, topCenter, plateTop + next, bottom + col, bottom + next, bottomCenter);
+      const bottom = capStart;
+      const outerTop = bottom + columns;
+      const plateTop = outerTop + columns;
+      const holeBottom = plateTop + columns;
+      const holeTop = holeBottom + columns;
+      const topCenter = holeBottom;
+      const bottomCenter = topCenter + 1;
+      if (!holeRadius) {
+        plateVertex(topCenter, 0, 0, 0);
+        plateVertex(bottomCenter, 0, -plateThickness, 0);
+      }
+      for (let col = 0; col < columns; col++) {
+        const next = (col + 1) % columns;
+        const outer = (radii[0] + wallThickness) * scales[col];
+        plateVertex(bottom + col, outer, -plateThickness, col);
+        plateVertex(outerTop + col, outer, 0, col);
+        plateVertex(plateTop + col, outer, 0, col);
+        caps.push(outerTop + col, outerTop + next, bottom + next, outerTop + col, bottom + next, bottom + col);
+        if (holeRadius) {
+          plateVertex(holeBottom + col, holeRadius, -plateThickness, col);
+          plateVertex(holeTop + col, holeRadius, 0, col);
+          caps.push(
+            plateTop + col, holeTop + col, holeTop + next, plateTop + col, holeTop + next, plateTop + next,
+            bottom + col, bottom + next, holeBottom + next, bottom + col, holeBottom + next, holeBottom + col,
+            holeTop + col, holeBottom + col, holeBottom + next, holeTop + col, holeBottom + next, holeTop + next,
+          );
+        } else {
+          caps.push(plateTop + col, topCenter, plateTop + next, bottom + col, bottom + next, bottomCenter);
+        }
       }
     }
-  }
 
-  if (hasHood) {
-    const apex = vertexCount - 1;
-    positions[apex * 3 + 1] = yApex;
-    colors.set(lantern ? hoodColor : baseColor, apex * 3);
-    const top = rows * columns;
-    for (let col = 0; col < columns; col++) {
-      caps.push(apex, top + (col + 1) % columns, top + col);
+    if (hasHood) {
+      const apex = capStart + plateVertices;
+      positions[apex * 3 + 1] = yApex;
+      colors.set(lantern ? hoodColor : baseColor, apex * 3);
+      const top = rows * columns;
+      for (let col = 0; col < columns; col++) {
+        caps.push(apex, gridIds[top + (col + 1) % columns], gridIds[top + col]);
+      }
     }
+
+    return caps;
   }
 
   floorMesh.visible = !wall;
   floorMesh.position.y = -plateThickness - 0.01;
   wallMesh.visible = wall;
-  return { ...contourPreviewGeometry(field, rows, columns, positions, colors, caps), yApex };
+  const geo = contourPreviewGeometry(field, rows, columns, writeVertex, capVertices, writeCaps);
+  return { geo, yApex };
 }
 
 function updatePreview() {
