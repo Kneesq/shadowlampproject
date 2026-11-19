@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Shadow Lamp Generator — single-file, no server needed">
+  <title>Shadow Lamp Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+:root{--bg-primary:#0a0e1a;--bg-secondary:#111827;--bg-card:rgba(17,24,39,.7);--bg-glass:rgba(30,41,59,.5);--border-glass:rgba(99,130,255,.15);--accent:#6c8aff;--accent-glow:rgba(108,138,255,.35);--accent-hover:#8ba3ff;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;--success:#34d399;--warning:#fbbf24;--danger:#f87171;--radius:12px;--transition:.25s cubic-bezier(.4,0,.2,1)}*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color:var(--text-primary);overflow:hidden}.app{display:flex;height:100vh}.panel{width:380px;min-width:340px;background:var(--bg-card);backdrop-filter:blur(24px);border-right:1px solid var(--border-glass);display:flex;flex-direction:column;overflow-y:auto;z-index:10}.panel-header{padding:28px 24px 20px;border-bottom:1px solid var(--border-glass)}.panel-header h1{font-size:20px;font-weight:700;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent),#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}.panel-header p{font-size:12px;color:var(--text-muted);margin-top:4px}.panel-body{flex:1;padding:20px 24px;display:flex;flex-direction:column;gap:20px}.section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:10px}.upload-zone{border:2px dashed var(--border-glass);border-radius:var(--radius);padding:32px 16px;text-align:center;cursor:pointer;transition:var(--transition);position:relative;overflow:hidden}.upload-zone:hover,.upload-zone.drag-over{border-color:var(--accent);background:rgba(108,138,255,.05)}.upload-zone.has-image{padding:8px;border-style:solid;border-color:var(--accent)}.upload-zone.has-image :is(.icon,.label,.sublabel){display:none}.upload-zone .icon{font-size:36px;margin-bottom:8px;opacity:.5}.upload-zone .label{font-size:13px;color:var(--text-secondary)}.upload-zone .sublabel{font-size:11px;color:var(--text-muted);margin-top:4px}.upload-zone img{max-width:100%;max-height:160px;border-radius:8px;display:block;margin:0 auto}.upload-zone input[type="file"]{display:none}.slider-group{display:flex;flex-direction:column;gap:14px}.slider-row{display:flex;flex-direction:column;gap:4px}.slider-label{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-secondary)}.slider-label .value{font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums;min-width:56px;text-align:right}input[type="range"]{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:3px;background:var(--bg-secondary);outline:none;cursor:pointer}input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-primary);box-shadow:0 0 8px var(--accent-glow);transition:var(--transition)}input[type="range"]::-webkit-slider-thumb:hover{transform:scale(1.2);box-shadow:0 0 14px var(--accent-glow)}.btn-group{display:flex;gap:10px;margin-top:auto;padding-top:12px}.btn{flex:1;padding:12px 16px;border:none;border-radius:var(--radius);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:var(--transition);display:flex;align-items:center;justify-content:center;gap:6px}.btn-primary{background:linear-gradient(135deg,var(--accent),#8b5cf6);color:#fff;box-shadow:0 4px 16px var(--accent-glow)}.btn-primary:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 24px var(--accent-glow)}.btn-primary:disabled{opacity:.4;cursor:not-allowed}.btn-secondary{background:var(--bg-glass);color:var(--text-primary);border:1px solid var(--border-glass)}.btn-secondary:hover:not(:disabled){background:rgba(30,41,59,.8);border-color:var(--accent)}.status-bar{padding:12px 24px;border-top:1px solid var(--border-glass);font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:8px}.status-dot{width:6px;height:6px;border-radius:50%;background:var(--text-muted);transition:var(--transition)}.status-dot.ready{background:var(--success)}.status-dot.busy{background:var(--warning);animation:pulse 1s infinite}.status-dot.error{background:var(--danger)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}.viewport{flex:1;position:relative;background:var(--bg-primary)}.viewport canvas{display:block;width:100%!important;height:100%!important}.loading-overlay{position:absolute;inset:0;background:rgba(10,14,26,.85);backdrop-filter:blur(8px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}.loading-overlay.visible{opacity:1;pointer-events:all}.spinner{width:40px;height:40px;border:3px solid var(--border-glass);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.loading-overlay p{margin-top:16px;font-size:13px;color:var(--text-secondary)}.viewport-hud{position:absolute;top:16px;right:16px;display:flex;gap:8px;z-index:5}.hud-badge{padding:6px 12px;background:var(--bg-glass);backdrop-filter:blur(12px);border:1px solid var(--border-glass);border-radius:8px;font-size:11px;color:var(--text-secondary);font-variant-numeric:tabular-nums}.panel::-webkit-scrollbar{width:4px}.panel::-webkit-scrollbar-track{background:transparent}.panel::-webkit-scrollbar-thumb{background:var(--border-glass);border-radius:2px}.shape-selector{display:flex;gap:12px;margin-bottom:10px}.radio-label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;padding:6px 12px;border-radius:8px;border:1px solid var(--border-glass);transition:var(--transition)}.radio-label:hover{border-color:var(--accent)}.radio-label input[type="radio"]{accent-color:var(--accent)}.radio-label input[type="radio"]:checked+span{color:var(--accent);font-weight:600}.upload-zone-sm{padding:16px 12px;margin-top:8px}.upload-zone-sm .icon{font-size:24px;margin-bottom:4px}.upload-zone-sm .label{font-size:12px}.upload-zone-sm .sublabel{font-size:10px}.upload-zone-sm img{max-height:80px}select{width:100%;padding:8px 12px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-glass);border-radius:8px;font-family:inherit;font-size:12px;cursor:pointer;outline:none}select:focus{border-color:var(--accent)}@media(max-width:768px){.app{flex-direction:column}.panel{width:100%;min-width:unset;max-height:45vh;border-right:none;border-bottom:1px solid var(--border-glass)}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <div class="panel-header">
+        <h1>Shadow Lamp</h1>
+        <p>Upload a silhouette → 3D-printable table lamp</p>
+      </div>
+      <div class="panel-body">
+        <section>
+          <div class="section-title">Shadow Pattern</div>
+          <div class="upload-zone" id="uploadZone">
+            <div class="icon">🌗</div>
+            <div class="label">Drop silhouette image here</div>
+            <div class="sublabel">PNG / JPG — black &amp; white</div>
+            <input type="file" id="fileInput" accept="image/*">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Shell Shape</div>
+          <div class="shape-selector">
+            <label class="radio-label"><input type="radio" name="shellShape" value="cylinder" id="shapeCylinder" checked><span>Cylinder</span></label>
+            <label class="radio-label"><input type="radio" name="shellShape" value="custom" id="shapeCustom"><span>Custom Profile</span></label>
+          </div>
+          <div class="upload-zone upload-zone-sm" id="profileZone" style="display:none">
+            <div class="icon">🏺</div>
+            <div class="label">Drop profile side-view</div>
+            <div class="sublabel">Black silhouette on white</div>
+            <input type="file" id="profileInput" accept="image/*">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Base Shape</div>
+          <select id="baseShape">
+            <option value="circle">Circle (Cylinder)</option>
+            <option value="triangle">Triangle</option>
+            <option value="square">Square</option>
+            <option value="pentagon">Pentagon</option>
+            <option value="hexagon">Hexagon</option>
+          </select>
+        </section>
+        <section>
+          <div class="section-title">Upper Shell (Above Light)</div>
+          <select id="upperShell">
+            <option value="solid">Keep (Solid)</option>
+            <option value="hollow" selected>Remove (Hollow)</option>
+          </select>
+          <div class="slider-row" id="upperShellHeightRow" style="margin-top:10px">
+            <div class="slider-label"><span>📏 Upper Shell Height</span><span class="value" id="upperShellHeightVal">15 mm</span></div>
+            <input type="range" id="upperShellHeight" min="5" max="50" value="15" step="1">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Bottom Style</div>
+          <select id="bottomStyle">
+            <option value="open">Without Bottom (Open)</option>
+            <option value="closed" selected>With Bottom (Closed Plate)</option>
+          </select>
+          <div class="slider-row" id="bottomThicknessRow" style="margin-top:10px">
+            <div class="slider-label"><span>📏 Bottom Thickness</span><span class="value" id="bottomThicknessVal">3 mm</span></div>
+            <input type="range" id="bottomThickness" min="1" max="10" value="3" step="0.5">
+          </div>
+          <div class="slider-row" id="bottomHoleRow" style="margin-top:10px">
+            <div class="slider-label"><span>🕳️ Base Hole Diameter</span><span class="value" id="bottomHoleDiamVal">30 mm</span></div>
+            <input type="range" id="bottomHoleDiam" min="0" max="80" value="30" step="1">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">3D Print Supports (Vertical Ribs)</div>
+          <select id="supportCount">
+            <option value="0" selected>None</option>
+            <option value="2">2 Columns</option>
+            <option value="3">3 Columns</option>
+            <option value="4">4 Columns</option>
+            <option value="6">6 Columns</option>
+          </select>
+          <div class="slider-row" id="supportWidthRow" style="margin-top:10px">
+            <div class="slider-label"><span>柱宽 Column Width</span><span class="value" id="supportWidthVal">4.0 mm</span></div>
+            <input type="range" id="supportWidth" min="2" max="10" value="4" step="0.5">
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Projection Target</div>
+          <div class="shape-selector">
+            <label class="radio-label"><input type="radio" name="projMode" value="floor" id="projFloor" checked><span>Floor</span></label>
+            <label class="radio-label"><input type="radio" name="projMode" value="wall" id="projWall"><span>Wall (Wrap)</span></label>
+          </div>
+        </section>
+        <section>
+          <div class="section-title">Parameters</div>
+          <div class="slider-group">
+            <div class="slider-row"><div class="slider-label"><span>💡 Light Brightness</span><span class="value" id="brightnessVal">3x</span></div><input type="range" id="brightness" min="1" max="10" value="3" step="0.5"></div>
+            <div class="slider-row"><div class="slider-label"><span>💡 Bulb Height</span><span class="value" id="bulbHeightVal">50 mm</span></div><input type="range" id="bulbHeight" min="10" max="150" value="50" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shell Diameter</span><span class="value" id="diameterVal">100 mm</span></div><input type="range" id="diameter" min="30" max="200" value="100" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shell Height</span><span class="value" id="heightVal">100 mm</span></div><input type="range" id="height" min="0" max="300" value="100" step="2"></div>
+            <div class="slider-row"><div class="slider-label"><span>Wall Thickness</span><span class="value" id="thicknessVal">2.0 mm</span></div><input type="range" id="thickness" min="1" max="5" value="2" step="0.5"></div>
+            <div class="slider-row"><div class="slider-label"><span>Shadow Size</span><span class="value" id="shadowSizeVal">300 mm</span></div><input type="range" id="shadowSize" min="100" max="800" value="300" step="10"></div>
+            <div class="slider-row"><div class="slider-label"><span>Resolution</span><span class="value" id="resolutionVal">200</span></div><input type="range" id="resolution" min="80" max="800" value="200" step="20"></div>
+          </div>
+        </section>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="downloadBtn" disabled>⬇ Download STL</button>
+          <button class="btn btn-secondary" id="resetBtn">↻ Reset</button>
+        </div>
+      </div>
+      <div class="status-bar"><span class="status-dot" id="statusDot"></span><span id="statusText">No image loaded</span></div>
+    </aside>
+    <main class="viewport" id="viewport">
+      <div class="viewport-hud"><div class="hud-badge" id="triCount">Faces: —</div></div>
+      <div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div><p id="loadingText">Generating STL…</p></div>
+    </main>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }}
+  </script>
+  <script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── DOM ──
+const viewport=document.getElementById('viewport'), uploadZone=document.getElementById('uploadZone'),
+  fileInput=document.getElementById('fileInput'), profileZone=document.getElementById('profileZone'),
+  profileInput=document.getElementById('profileInput'), downloadBtn=document.getElementById('downloadBtn'),
+  resetBtn=document.getElementById('resetBtn'), statusDot=document.getElementById('statusDot'),
+  statusText=document.getElementById('statusText'), triCount=document.getElementById('triCount'),
+  loadingOverlay=document.getElementById('loadingOverlay'), loadingTextEl=document.getElementById('loadingText'),
+  shapeCylinder=document.getElementById('shapeCylinder'), shapeCustom=document.getElementById('shapeCustom');
+
+const S={
+  brightness:{el:document.getElementById('brightness'),vEl:document.getElementById('brightnessVal'),fmt:v=>`${(+v).toFixed(1)}x`},
+  bulbHeight:{el:document.getElementById('bulbHeight'),vEl:document.getElementById('bulbHeightVal'),fmt:v=>`${v} mm`},
+  diameter:{el:document.getElementById('diameter'),vEl:document.getElementById('diameterVal'),fmt:v=>`${v} mm`},
+  height:{el:document.getElementById('height'),vEl:document.getElementById('heightVal'),fmt:v=>v==='0'?'0 mm (Stencil)':`${v} mm`},
+  thickness:{el:document.getElementById('thickness'),vEl:document.getElementById('thicknessVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+  shadowSize:{el:document.getElementById('shadowSize'),vEl:document.getElementById('shadowSizeVal'),fmt:v=>`${v} mm`},
+  resolution:{el:document.getElementById('resolution'),vEl:document.getElementById('resolutionVal'),fmt:v=>v},
+  upperShellHeight:{el:document.getElementById('upperShellHeight'),vEl:document.getElementById('upperShellHeightVal'),fmt:v=>`${v} mm`},
+  supportWidth:{el:document.getElementById('supportWidth'),vEl:document.getElementById('supportWidthVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+  bottomHoleDiam:{el:document.getElementById('bottomHoleDiam'),vEl:document.getElementById('bottomHoleDiamVal'),fmt:v=>`${v} mm`},
+  bottomThickness:{el:document.getElementById('bottomThickness'),vEl:document.getElementById('bottomThicknessVal'),fmt:v=>`${(+v).toFixed(1)} mm`},
+};
+
+let imageData=null,profileData=null,previewMesh=null,debounce=null;
+let uploadGeneration=0;
+
+// ── Three.js ──
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x0a0e1a);
+const camera=new THREE.PerspectiveCamera(45,1,.1,5000); camera.position.set(0,180,250);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+viewport.appendChild(renderer.domElement);
+const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.target.set(0,40,0);
+
+const ptLight=new THREE.PointLight(0xfff4e0,6,2000,.3); ptLight.castShadow=true;
+ptLight.shadow.mapSize.set(4096,4096); ptLight.shadow.camera.near=10; ptLight.shadow.camera.far=400; ptLight.shadow.radius=1.5;
+scene.add(ptLight);
+const ambLight=new THREE.AmbientLight(0x334466,.4); scene.add(ambLight);
+const bulb=new THREE.Mesh(new THREE.SphereGeometry(2,12,12),new THREE.MeshBasicMaterial({color:0xfff4e0})); scene.add(bulb);
+const floorMesh=new THREE.Mesh(new THREE.PlaneGeometry(800,800),new THREE.MeshStandardMaterial({color:0xffffff,roughness:.8,metalness:.1}));
+floorMesh.rotation.x=-Math.PI/2; floorMesh.receiveShadow=true; scene.add(floorMesh);
+const wallMat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:.9,metalness:.1,side:THREE.BackSide});
+const wallMesh=new THREE.Mesh(new THREE.CylinderGeometry(300,300,400,64),wallMat); wallMesh.position.y=100; wallMesh.receiveShadow=true; scene.add(wallMesh);
+const floorGrid = new THREE.GridHelper(800, 40, 0x1a2440, 0x111827);
+scene.add(floorGrid);
+const previewMaterial = new THREE.MeshStandardMaterial({
+  color: 0x8090b0, metalness: .3, roughness: .6, side: THREE.DoubleSide
+});
+
+function updateLightPos(){const bH=+S.bulbHeight.el.value,br=+S.brightness.el.value;ptLight.position.set(0,bH,0);ptLight.intensity=br*2;ptLight.distance=600+br*200;ambLight.intensity=.2+br*.08;bulb.position.copy(ptLight.position);bulb.scale.setScalar(.5+br*.3)}
+updateLightPos();
+
+function resize(){const w=viewport.clientWidth,h=viewport.clientHeight;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h)}
+resize(); window.addEventListener('resize',resize);
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera)})();
+
+// ── Upload ──
+for (const radio of [shapeCylinder, shapeCustom]) {
+  radio.addEventListener('change', () => {
+    profileZone.style.display = shapeCustom.checked ? '' : 'none';
+    scheduleUpdate();
+  });
+}
+
+function setupUpload(zone, input, onImage) {
+  let latest = 0;
+  async function load(file) {
+    const request = ++latest;
+    const generation = uploadGeneration;
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      if (request !== latest || generation !== uploadGeneration) return;
+      const scale = Math.min(1, 1024 / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(image, 0, 0, width, height);
+      const pixels = ctx.getImageData(0, 0, width, height).data;
+      const data = new Uint8Array(width * height);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = Math.round(.299 * pixels[4 * i] + .587 * pixels[4 * i + 1] + .114 * pixels[4 * i + 2]);
+      }
+
+      zone.querySelector('img')?.remove();
+      image.alt = file.name;
+      zone.appendChild(image);
+      zone.classList.add('has-image');
+      onImage({width, height, data});
+      scheduleUpdate();
+    } catch (error) {
+      if (request === latest && generation === uploadGeneration) {
+        setStatus('error', 'Could not open the selected image.');
+      }
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  zone.addEventListener('click', event => {
+    if (event.target !== input) input.click();
+  });
+  zone.addEventListener('dragover', event => {
+    event.preventDefault();
+    zone.classList.add('drag-over');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', event => {
+    event.preventDefault();
+    zone.classList.remove('drag-over');
+    if (event.dataTransfer.files.length) load(event.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) load(input.files[0]);
+  });
+}
+setupUpload(uploadZone, fileInput, image => {
+  imageData = image;
+  downloadBtn.disabled = false;
+  setStatus('ready', `Image loaded: ${image.width}×${image.height}`);
+});
+setupUpload(profileZone, profileInput, ({width, height, data}) => {
+  profileData = extractProfile(width, height, data);
+  setStatus('ready', 'Custom profile loaded');
+});
+
+const TAU = 2 * Math.PI;
+const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+
+function bilinearSample(gray, width, height, x, y, wrapX) {
+  x = wrapX ? x : clamp(x, 0, width - 1);
+  y = clamp(y, 0, height - 1);
+  const left = Math.floor(x);
+  const top = Math.floor(y);
+  const tx = x - left;
+  const ty = y - top;
+  const x0 = wrapX ? (left + width) % width : left;
+  const x1 = wrapX ? (x0 + 1) % width : Math.min(x0 + 1, width - 1);
+  const row0 = top * width;
+  const row1 = Math.min(top + 1, height - 1) * width;
+  const upper = gray[row0 + x0] * (1 - tx) + gray[row0 + x1] * tx;
+  const lower = gray[row1 + x0] * (1 - tx) + gray[row1 + x1] * tx;
+  return upper * (1 - ty) + lower * ty;
+}
+
+function extractProfile(width, height, gray) {
+  const center = (width - 1) / 2;
+  const radii = new Float32Array(height);
+  let largest = 0;
+  for (let row = 0; row < height; row++) {
+    const offset = row * width;
+    let left = 0;
+    let right = width - 1;
+    while (left < width && gray[offset + left] >= 128) left++;
+    if (left === width) continue;
+    while (gray[offset + right] >= 128) right--;
+
+    const leftGray = gray[offset + left];
+    const rightGray = gray[offset + right];
+    const leftEdge = left === 0 ? -.5
+      : left - (128 - leftGray) / (gray[offset + left - 1] - leftGray);
+    const rightEdge = right === width - 1 ? width - .5
+      : right + (128 - rightGray) / (gray[offset + right + 1] - rightGray);
+    const radius = Math.max(center - leftEdge, rightEdge - center);
+    radii[height - 1 - row] = radius;
+    largest = Math.max(largest, radius);
+  }
+  if (largest) {
+    for (let i = 0; i < height; i++) radii[i] /= largest;
+  }
+  return radii;
+}
+
+function buildLamp() {
+  if (!imageData) return null;
+  const selected = id => document.getElementById(id).value;
+  const resolution = +S.resolution.el.value;
+  const radius = +S.diameter.el.value / 2;
+  const height = +S.height.el.value || .1;
+  const thickness = +S.thickness.el.value;
+  const baseThickness = selected('bottomStyle') === 'closed' ? +S.bottomThickness.el.value : 0;
+  const wall = document.getElementById('projWall').checked;
+  const sides = {triangle: 3, square: 4, pentagon: 5, hexagon: 6}[selected('baseShape')] || 0;
+  // Place a mesh column on every polygon corner.
+  const columns = sides ? Math.ceil(resolution / (2 * sides)) * 2 * sides : resolution;
+  const angleStep = TAU / columns;
+  const heightStep = height / resolution;
+  const radii = new Float32Array(resolution + 1).fill(radius);
+
+  if (shapeCustom.checked && profileData) {
+    for (let i = 0; i <= resolution; i++) {
+      const sample = i / resolution * (profileData.length - 1);
+      const low = Math.floor(sample);
+      const high = Math.min(low + 1, profileData.length - 1);
+      radii[i] = radius * Math.max(.02,
+        profileData[low] + (profileData[high] - profileData[low]) * (sample - low));
+    }
+    // Reduce stair steps in traced silhouettes while keeping the end radii.
+    const originalRadii = radii.slice();
+    for (let i = 1; i < resolution; i++) {
+      radii[i] = (originalRadii[Math.max(0, i - 2)] + 4 * originalRadii[i - 1]
+        + 6 * originalRadii[i] + 4 * originalRadii[i + 1]
+        + originalRadii[Math.min(resolution, i + 2)]) / 16;
+    }
+  }
+
+  const sideAngle = sides ? TAU / sides : TAU;
+  function polygonScale(angle) {
+    return sides ? 1 / Math.cos(angle - Math.round(angle / sideAngle) * sideAngle) : 1;
+  }
+
+  const {width: imageWidth, height: imageHeight, data: gray} = imageData;
+  const shadowWidth = +S.shadowSize.el.value;
+  const shadowHeight = shadowWidth * imageHeight / imageWidth;
+  const lightHeight = +S.bulbHeight.el.value;
+  const upperHeight = +S.upperShellHeight.el.value;
+  const keepUpper = !wall && selected('upperShell') === 'solid';
+  const supportCount = +selected('supportCount');
+  const supportAngle = supportCount ? TAU / supportCount : TAU;
+  const supportHalfWidth = +S.supportWidth.el.value / 2;
+  const ringSize = (resolution + 1) * columns;
+  const field = new Float32Array(ringSize);
+  const upperLimits = new Float32Array(columns);
+  const thresholdBias = .001;
+
+  function sampleMask(row, column, shellRadius) {
+    const y = row * heightStep;
+    const angle = column * angleStep;
+    let mask = -1;
+    if (wall) {
+      const u = column / columns * imageWidth - .5;
+      const v = (1 - row / resolution) * imageHeight - .5;
+      mask = (128 - bilinearSample(gray, imageWidth, imageHeight, u, v, true)) / 128;
+    } else if (y < lightHeight - 1e-6) {
+      const projectedRadius = shellRadius * polygonScale(angle) *
+        (lightHeight + baseThickness) / (lightHeight - y);
+      const u = (projectedRadius * Math.cos(angle) / shadowWidth + .5) * imageWidth;
+      const v = (projectedRadius * Math.sin(angle) / shadowHeight + .5) * imageHeight;
+      const margin = Math.min(u, imageWidth - u, v, imageHeight - v);
+      mask = Math.min(margin,
+        (128 - bilinearSample(gray, imageWidth, imageHeight, u - .5, v - .5, false)) / 128);
+    }
+
+    // Keep a continuous ring at the base and keep crossings off lattice vertices.
+    if (row <= 1) mask = Math.max(mask, thresholdBias);
+    return mask > 0 ? clamp(mask, thresholdBias, 1) : clamp(mask, -1, -thresholdBias);
+  }
+
+  for (let row = 0; row <= resolution; row++) {
+    for (let column = 0; column < columns; column++) {
+      field[row * columns + column] = sampleMask(row, column, radii[row]);
+    }
+  }
+
+  // Soften the projected silhouette before interpolating its crossing points.
+  // The horizontal pass wraps to keep the angular seam continuous.
+  const horizontal = new Float32Array(ringSize);
+  for (let row = 0; row <= resolution; row++) {
+    const offset = row * columns;
+    for (let column = 0; column < columns; column++) {
+      const nearLeft = (column + columns - 1) % columns;
+      const nearRight = (column + 1) % columns;
+      const farLeft = (column + columns - 2) % columns;
+      const farRight = (column + 2) % columns;
+      horizontal[offset + column] = (field[offset + farLeft] + 4 * field[offset + nearLeft]
+        + 6 * field[offset + column] + 4 * field[offset + nearRight] + field[offset + farRight]) / 16;
+    }
+  }
+  for (let row = 0; row <= resolution; row++) {
+    const farBelow = Math.max(0, row - 2) * columns;
+    const below = Math.max(0, row - 1) * columns;
+    const offset = row * columns;
+    const above = Math.min(resolution, row + 1) * columns;
+    const farAbove = Math.min(resolution, row + 2) * columns;
+    const y = row * heightStep;
+    for (let column = 0; column < columns; column++) {
+      let mask = (horizontal[farBelow + column] + 4 * horizontal[below + column]
+        + 6 * horizontal[offset + column] + 4 * horizontal[above + column]
+        + horizontal[farAbove + column]) / 16;
+      if (!wall && y >= lightHeight) mask = -1;
+      if (supportCount && (wall || y < lightHeight)) {
+        const angle = column * angleStep;
+        const distance = Math.abs(angle - Math.round(angle / supportAngle) * supportAngle);
+        const support = (supportHalfWidth - distance * radii[row]) / (angleStep * radii[row]);
+        mask = Math.max(mask, support);
+      }
+      if (row <= 1) mask = Math.max(mask, thresholdBias);
+      field[offset + column] = mask > 0 ? Math.max(mask, thresholdBias) : Math.min(mask, -thresholdBias);
+    }
+  }
+
+  if (keepUpper && lightHeight < height) {
+    for (let column = 0; column < columns; column++) {
+      for (let row = Math.min(resolution - 1, Math.floor(lightHeight / heightStep)); row >= 0; row--) {
+        const below = field[row * columns + column];
+        if (below < 0) continue;
+        const above = field[(row + 1) * columns + column];
+        const top = Math.min(lightHeight, (row + (above < 0 ? below / (below - above) : 1)) * heightStep);
+        upperLimits[column] = Math.min(top + upperHeight, height);
+        break;
+      }
+    }
+    for (let row = Math.ceil(lightHeight / heightStep); row <= resolution; row++) {
+      const y = row * heightStep;
+      for (let column = 0; column < columns; column++) {
+        const limit = upperLimits[column];
+        if (limit <= lightHeight) continue;
+        const key = row * columns + column;
+        const cap = clamp(Math.min(y - lightHeight, limit - y) / heightStep, -1, 1);
+        field[key] = Math.max(field[key], cap >= 0 ? Math.max(cap, thresholdBias) : Math.min(cap, -thresholdBias));
+      }
+    }
+  }
+
+  const positions = [];
+  const indices = [];
+  const vertexIds = new Int32Array(3 * ringSize).fill(-1);
+
+  function vertex(x, y, z) {
+    const id = positions.length / 3;
+    positions.push(x, y, z);
+    return id;
+  }
+
+  function copyAt(id, y = positions[id * 3 + 1]) {
+    return vertex(positions[id * 3], y, positions[id * 3 + 2]);
+  }
+
+  function pair(key, row, column) {
+    if (vertexIds[key] !== -1) return vertexIds[key];
+    const low = Math.floor(row);
+    const r = radii[low] + (radii[Math.min(low + 1, resolution)] - radii[low]) * (row - low);
+    const angle = column * angleStep;
+    const scale = polygonScale(angle);
+    const x = Math.cos(angle) * scale;
+    const z = Math.sin(angle) * scale;
+    const y = row * heightStep;
+    const outside = vertex((r + thickness) * x, y, (r + thickness) * z);
+    vertex(r * x, y, r * z);
+    vertexIds[key] = outside;
+    return outside;
+  }
+
+  function quad(a, b, c, d) {
+    indices.push(a, b, c, a, c, d);
+  }
+
+  function cutWall(a, b) {
+    // Separate vertices keep the cut face sharp in the preview.
+    quad(copyAt(a), copyAt(b), copyAt(b + 1), copyAt(a + 1));
+  }
+
+  // Corners are numbered counterclockwise in the unwrapped grid.
+  // Codes 4–7 are crossings on the four corresponding edges.
+  const onEdge = [9, 3, 6, 12, 1, 2, 4, 8];
+  const cellIds = new Int32Array(8);
+  const cellValues = new Float32Array(4);
+  const polygon = new Int8Array(6);
+  let cutSegments = 0;
+
+  function emitPolygon(count, boundaryEdges) {
+    const a = cellIds[polygon[0]];
+    for (let k = 1; k < count - 1; k++) {
+      const b = cellIds[polygon[k]];
+      const c = cellIds[polygon[k + 1]];
+      indices.push(a, c, b, a + 1, b + 1, c + 1);
+    }
+    for (let k = 0; k < count; k++) {
+      const p = polygon[k];
+      const q = polygon[(k + 1) % count];
+      if (p >= 4 && q >= 4) {
+        cutWall(cellIds[p], cellIds[q]);
+        cutSegments++;
+      } else if (onEdge[p] & onEdge[q] & boundaryEdges) {
+        cutWall(cellIds[p], cellIds[q]);
+      }
+    }
+  }
+
+  for (let row = 0; row < resolution; row++) {
+    const boundaryEdges = (row === 0 && !baseThickness ? 1 : 0) | (row === resolution - 1 ? 4 : 0);
+    for (let column = 0; column < columns; column++) {
+      const next = (column + 1) % columns;
+      const bottomLeft = row * columns + column;
+      const bottomRight = row * columns + next;
+      const topLeft = bottomLeft + columns;
+      const topRight = bottomRight + columns;
+      cellValues[0] = field[bottomLeft];
+      cellValues[1] = field[bottomRight];
+      cellValues[2] = field[topRight];
+      cellValues[3] = field[topLeft];
+
+      const solid = (cellValues[0] > 0 ? 1 : 0) | (cellValues[1] > 0 ? 2 : 0) |
+        (cellValues[2] > 0 ? 4 : 0) | (cellValues[3] > 0 ? 8 : 0);
+      if (!solid) continue;
+      if (solid & 1) cellIds[0] = pair(bottomLeft, row, column);
+      if (solid & 2) cellIds[1] = pair(bottomRight, row, next);
+      if (solid & 4) cellIds[2] = pair(topRight, row + 1, next);
+      if (solid & 8) cellIds[3] = pair(topLeft, row + 1, column);
+
+      // Shared edge IDs make neighboring cells meet exactly, including at the wrap seam.
+      if ((solid & 1) !== ((solid & 2) >> 1)) {
+        const t = cellValues[0] / (cellValues[0] - cellValues[1]);
+        cellIds[4] = pair(ringSize + bottomLeft, row, column + t);
+      }
+      if (((solid & 2) >> 1) !== ((solid & 4) >> 2)) {
+        const t = cellValues[1] / (cellValues[1] - cellValues[2]);
+        cellIds[5] = pair(2 * ringSize + bottomRight, row + t, next);
+      }
+      if (((solid & 4) >> 2) !== ((solid & 8) >> 3)) {
+        const t = cellValues[3] / (cellValues[3] - cellValues[2]);
+        cellIds[6] = pair(ringSize + topLeft, row + 1, column + t);
+      }
+      if (((solid & 8) >> 3) !== (solid & 1)) {
+        const t = cellValues[0] / (cellValues[0] - cellValues[3]);
+        cellIds[7] = pair(2 * ringSize + bottomLeft, row + t, column);
+      }
+
+      if (solid === 5 || solid === 10) {
+        // The determinant resolves the ambiguous saddle of the smoothed field.
+        const saddle = cellValues[0] * cellValues[2] - cellValues[1] * cellValues[3];
+        const separate = solid === 5 ? saddle <= 0 : saddle >= 0;
+        if (separate) {
+          for (let corner = solid === 5 ? 0 : 1; corner < 4; corner += 2) {
+            polygon[0] = corner;
+            polygon[1] = corner + 4;
+            polygon[2] = (corner + 3) % 4 + 4;
+            emitPolygon(3, boundaryEdges);
+          }
+          continue;
+        }
+      }
+
+      let count = 0;
+      for (let corner = 0; corner < 4; corner++) {
+        const inside = cellValues[corner] > 0;
+        if (inside) polygon[count++] = corner;
+        if (inside !== (cellValues[(corner + 1) % 4] > 0)) polygon[count++] = corner + 4;
+      }
+      emitPolygon(count, boundaryEdges);
+    }
+  }
+
+  if (baseThickness) {
+    const holeRadius = clamp(+S.bottomHoleDiam.el.value / 2, 0,
+      Math.max(0, radii[0] - thickness / 10));
+    const edgeTop = [];
+    const edgeBottom = [];
+    const plateTop = [];
+    const plateBottom = [];
+    const holeTop = [];
+    const holeBottom = [];
+    for (let column = 0; column < columns; column++) {
+      const outside = pair(column, 0, column);
+      edgeTop.push(copyAt(outside));
+      edgeBottom.push(copyAt(outside, -baseThickness));
+      plateTop.push(copyAt(outside + 1));
+      plateBottom.push(copyAt(outside, -baseThickness));
+      if (holeRadius) {
+        const angle = column * angleStep;
+        const x = holeRadius * Math.cos(angle);
+        const z = holeRadius * Math.sin(angle);
+        holeTop.push(vertex(x, 0, z));
+        holeBottom.push(vertex(x, -baseThickness, z));
+      }
+    }
+
+    const topCenter = holeRadius ? -1 : vertex(0, 0, 0);
+    const bottomCenter = holeRadius ? -1 : vertex(0, -baseThickness, 0);
+    for (let column = 0; column < columns; column++) {
+      const next = (column + 1) % columns;
+      quad(edgeTop[column], edgeTop[next], edgeBottom[next], edgeBottom[column]);
+      if (holeRadius) {
+        quad(plateTop[column], holeTop[column], holeTop[next], plateTop[next]);
+        quad(plateBottom[column], plateBottom[next], holeBottom[next], holeBottom[column]);
+        quad(copyAt(holeTop[column]), copyAt(holeBottom[column]),
+          copyAt(holeBottom[next]), copyAt(holeTop[next]));
+      } else {
+        indices.push(plateTop[column], topCenter, plateTop[next]);
+        indices.push(plateBottom[column], plateBottom[next], bottomCenter);
+      }
+    }
+  }
+
+  return {
+    positions: Float32Array.from(positions),
+    indices: Uint32Array.from(indices),
+    baseThickness, wall, cutSegments
+  };
+}
+
+let currentModel = null;
+
+function disposePreview() {
+  if (!previewMesh) return;
+  scene.remove(previewMesh);
+  previewMesh.geometry.dispose();
+  previewMesh = null;
+}
+
+function updatePreview() {
+  debounce = null;
+  const model = buildLamp();
+  disposePreview();
+  currentModel = model;
+  if (!model) return;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(model.positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(model.indices, 1));
+  geometry.computeVertexNormals();
+  previewMesh = new THREE.Mesh(geometry, previewMaterial);
+  previewMesh.castShadow = true;
+  previewMesh.receiveShadow = true;
+  scene.add(previewMesh);
+
+  floorMesh.visible = !model.wall;
+  floorGrid.visible = !model.wall;
+  floorMesh.position.y = -model.baseThickness - .01;
+  floorGrid.position.y = -model.baseThickness;
+  wallMesh.visible = model.wall;
+  triCount.textContent = 'Faces: ' + (model.indices.length / 3).toLocaleString();
+  updateLightPos();
+}
+
+function scheduleUpdate() {
+  clearTimeout(debounce);
+  debounce = setTimeout(updatePreview, 80);
+}
+
+function encodeSTL({positions, indices}) {
+  const count = indices.length / 3;
+  const buffer = new ArrayBuffer(84 + count * 50);
+  const data = new DataView(buffer);
+  const title = new TextEncoder().encode('Shadow Lamp Generator');
+  new Uint8Array(buffer).set(title);
+  data.setUint32(80, count, true);
+
+  for (let face = 0, offset = 84; face < count; face++, offset += 50) {
+    const a = 3 * indices[face * 3];
+    const b = 3 * indices[face * 3 + 1];
+    const c = 3 * indices[face * 3 + 2];
+    const ux = positions[b] - positions[a];
+    const uy = positions[b + 1] - positions[a + 1];
+    const uz = positions[b + 2] - positions[a + 2];
+    const vx = positions[c] - positions[a];
+    const vy = positions[c + 1] - positions[a + 1];
+    const vz = positions[c + 2] - positions[a + 2];
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const length = Math.hypot(nx, ny, nz) || 1;
+    data.setFloat32(offset, nx / length, true);
+    data.setFloat32(offset + 4, ny / length, true);
+    data.setFloat32(offset + 8, nz / length, true);
+    for (let axis = 0; axis < 3; axis++) {
+      data.setFloat32(offset + 12 + axis * 4, positions[a + axis], true);
+      data.setFloat32(offset + 24 + axis * 4, positions[b + axis], true);
+      data.setFloat32(offset + 36 + axis * 4, positions[c + axis], true);
+    }
+  }
+  return new Blob([buffer], {type: 'model/stl'});
+}
+
+downloadBtn.addEventListener('click', () => {
+  if (!imageData) return;
+  showLoading('Generating STL — please wait…');
+  downloadBtn.disabled = true;
+  setTimeout(() => {
+    try {
+      if (debounce !== null || !currentModel) {
+        clearTimeout(debounce);
+        updatePreview();
+      }
+      const model = currentModel;
+      if (!model) return;
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(encodeSTL(model));
+      link.download = 'shadow_lamp.stl';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      setStatus('ready', 'STL downloaded ✓ (' + (model.indices.length / 3).toLocaleString() + ' triangles)');
+    } catch (error) {
+      setStatus('error', 'Error: ' + error.message);
+    } finally {
+      hideLoading();
+      downloadBtn.disabled = !imageData;
+    }
+  }, 50);
+});
+
+resetBtn.addEventListener('click', () => {
+  uploadGeneration++;
+  clearTimeout(debounce);
+  debounce = null;
+  imageData = profileData = currentModel = null;
+  downloadBtn.disabled = true;
+  fileInput.value = '';
+  profileInput.value = '';
+  for (const zone of [uploadZone, profileZone]) {
+    zone.querySelector('img')?.remove();
+    zone.classList.remove('has-image');
+  }
+  disposePreview();
+  triCount.textContent = 'Faces: —';
+  setStatus('', 'No image loaded');
+});
+
+// ── Slider events ──
+for(const[key,s]of Object.entries(S)){s.el.addEventListener('input',()=>{s.vEl.textContent=s.fmt(s.el.value);if(key==='brightness'||key==='bulbHeight')updateLightPos();if(key!=='brightness')scheduleUpdate()})}
+function updateVisibility(){
+  const ush=document.getElementById('upperShell').value,pm=document.querySelector('input[name="projMode"]:checked').value;
+  document.getElementById('upperShellHeightRow').style.display=ush==='solid'&&pm==='floor'?'':'none';
+  const bs=document.getElementById('bottomStyle').value;
+  document.getElementById('bottomHoleRow').style.display=bs==='closed'?'':'none';
+  document.getElementById('bottomThicknessRow').style.display=bs==='closed'?'':'none';
+}
+updateVisibility();
+for(const r of document.querySelectorAll('input[name="projMode"]'))r.addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('baseShape').addEventListener('change',scheduleUpdate);
+document.getElementById('upperShell').addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('bottomStyle').addEventListener('change',()=>{updateVisibility();scheduleUpdate()});
+document.getElementById('supportCount').addEventListener('change',scheduleUpdate);
+
+function setStatus(s,t){statusDot.className='status-dot '+s;statusText.textContent=t}
+function showLoading(t){loadingTextEl.textContent=t;loadingOverlay.classList.add('visible')}
+function hideLoading(){loadingOverlay.classList.remove('visible')}
+  </script>
+</body>
+</html>
