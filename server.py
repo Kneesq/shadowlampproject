@@ -1,169 +1,159 @@
-"""
-server.py — Flask API (v2 manifold pipeline)
+"""Local Flask frontend and printable Shadow Lamp mesh export."""
 
-GET  /                → static/index.html
-POST /api/generate    → 接收图片+参数, 返回 watertight STL
-"""
+import json
+import tempfile
+import time
+from pathlib import Path
+from uuid import uuid4
 
-import os, time, tempfile
 import numpy as np
-from PIL import Image
-from flask import Flask, request, jsonify, send_from_directory
+from PIL import Image, UnidentifiedImageError
+from flask import Flask, jsonify, request, send_from_directory
 
 from shadow_lamp_v2 import (
-    load_and_binarize, extract_profile,
-    build_cylinder_mask, build_manifold_mesh, smooth_and_decimate,
-    export_3mf
+    build_cylinder_mask, build_manifold_mesh, extract_profile,
+    load_and_binarize, smooth_and_decimate, upper_shell_start,
 )
 
 app = Flask(__name__, static_folder='static', static_url_path='')
+_export_session = tempfile.TemporaryDirectory(prefix='shadow-lamp-exports-', ignore_cleanup_errors=True)
+_export_dir = Path(_export_session.name)
+_download_lifetime = 24 * 60 * 60
 
 
-@app.route('/')
+@app.get('/')
 def index():
     return app.send_static_file('index.html')
 
 
-@app.route('/api/download/<filename>')
+@app.get('/api/download/<filename>')
 def download_stl(filename):
-    path = os.path.join(app.static_folder, filename)
-    if os.path.exists(path):
-        return send_from_directory(
-            app.static_folder, filename,
-            as_attachment=True, download_name='shadow_lamp.stl',
-            mimetype='application/octet-stream')
-    return "Not Found", 404
+    if not filename.startswith('shadow_lamp_') or not filename.endswith('.stl'):
+        return 'Not Found', 404
+    # Older versions saved downloads under static; their existing URLs still work.
+    directory = _export_dir if (_export_dir / filename).is_file() else app.static_folder
+    return send_from_directory(directory, filename, as_attachment=True,
+                               download_name='shadow_lamp.stl', mimetype='model/stl')
 
 
-@app.route('/api/generate', methods=['POST'])
+def number(name, default, low, high, kind=float):
+    value = kind(request.form.get(name, default))
+    if not low <= value <= high:
+        raise ValueError(f'{name} must be between {low} and {high}.')
+    return value
+
+
+def enabled(name, default=False):
+    return request.form.get(name, str(default)).lower() == 'true'
+
+
+def normalized_radii(name, size=None):
+    values = np.asarray(json.loads(request.form[name]), dtype=np.float64)
+    if (values.ndim != 1 or not 2 <= len(values) <= 16384 or
+            (size and len(values) != size) or not np.isfinite(values).all()
+            or np.any(values < 0) or np.any(values > 1.001)):
+        raise ValueError(f'Invalid {name}.')
+    return values
+
+
+@app.post('/api/generate')
 def generate():
-    if 'image' not in request.files:
+    if 'image' not in request.files and 'silhouette_mask' not in request.files:
         return jsonify(error='No image uploaded'), 400
-
-    f = request.files['image']
-    radius     = float(request.form.get('radius', 50))
-    h_slider   = float(request.form.get('height', 100))
-    height     = 0.1 if h_slider == 0 else h_slider
-    thickness  = float(request.form.get('thickness', 2))
-    base_thickness = float(request.form.get('base_thickness', 5))
-    shadow_size = float(request.form.get('shadow_size', 300))
-    resolution = int(request.form.get('resolution', 200))
-    threshold  = int(request.form.get('threshold', 128))
-    target_faces = int(request.form.get('target_faces', 300000))
-    invert     = request.form.get('invert', 'false').lower() == 'true'
-    base_shape = request.form.get('base_shape', 'circle')
-    proj_mode  = request.form.get('proj_mode', 'floor')
-    bulb_height = float(request.form.get('bulb_height', 50.0))
-    keep_upper_shell = request.form.get('keep_upper_shell', 'false').lower() == 'true'
-    upper_shell_height = float(request.form.get('upper_shell_height', 15.0))
-    with_bottom = request.form.get('with_bottom', 'true').lower() == 'true'
-    bottom_hole_diam = float(request.form.get('bottom_hole_diam', 30))
-    bottom_thickness = float(request.form.get('bottom_thickness', 3))
-
-    # Custom shape radii (360 normalized floats) — used by both 'custom' and 'match_pattern'
-    custom_shape_radii = None
-    if base_shape in ('custom', 'match_pattern'):
-        raw = request.form.get('custom_shape_radii', '')
-        if raw:
-            import json
-            custom_shape_radii = np.array(json.loads(raw), dtype=np.float64)
-
-    shell_shape = request.form.get('shell_shape', 'cylinder')
-    with_top_hook = request.form.get('with_top_hook', 'false').lower() == 'true'
-    support_count = int(request.form.get('support_count', 0))
-    support_width = float(request.form.get('support_width', 4.0))
-
-    # Lithophane Relief
-    litho_gray = None
-    litho_min_thick = float(request.form.get('litho_min_thick', 1.2))
-    litho_max_thick = float(request.form.get('litho_max_thick', 3.0))
-    litho_repeat = int(request.form.get('litho_repeat', 1))
-    litho_invert = request.form.get('litho_invert', 'false').lower() == 'true'
-    litho_width_scale = float(request.form.get('litho_width_scale', 100.0)) / 100.0
-    litho_height_scale = float(request.form.get('litho_height_scale', 100.0)) / 100.0
-    litho_offset = float(request.form.get('litho_offset', 0.0))
-
-    if 'litho_image' in request.files and request.files['litho_image'].filename:
-        tmp_l = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        request.files['litho_image'].save(tmp_l.name)
-        tmp_l.close()
-        img = Image.open(tmp_l.name).convert('L')
-        litho_gray = np.array(img, dtype=np.uint8)
-        os.unlink(tmp_l.name)
-
-    tmp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-
     try:
-        f.save(tmp_img.name)
-        tmp_img.close()
+        radius = number('radius', 50, 1, 100)
+        height = max(.1, number('height', 100, 0, 300))
+        thickness = number('thickness', 2, .4, 10)
+        resolution = number('resolution', 200, 16, 1600, int)
+        shadow_size = number('shadow_size', 300, 1, 1000)
+        threshold = number('threshold', 128, 0, 255, int)
+        target_faces = number('target_faces', 300000, 100, 3000000, int)
+        bulb_height = number('bulb_height', 50, 1, 300)
+        upper_height = number('upper_shell_height', 15, 0, 200)
+        base = number('bottom_thickness', 3, 0, 20) if enabled('with_bottom', True) else 0
+        hole = number('bottom_hole_diam', 30, 0, 200)
+        support_count = number('support_count', 0, 0, 16, int)
+        support_width = number('support_width', 4, .1, 30)
+        base_shape = request.form.get('base_shape', 'circle')
+        mode = request.form.get('proj_mode', 'floor')
+        if mode not in ('floor', 'wall'):
+            raise ValueError('Unknown projection mode.')
 
-        binary = load_and_binarize(tmp_img.name, threshold, invert)
+        if 'silhouette_mask' in request.files:
+            # The browser sends the exact cleaned coverage shown in the preview.
+            with Image.open(request.files['silhouette_mask'].stream) as mask:
+                mask.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                coverage = 1.0 - np.asarray(mask.convert('L'), dtype=np.float32) / 255
+        else:
+            coverage = load_and_binarize(request.files['image'].stream, threshold, enabled('invert'))
 
-        # Profile
         profile = None
-        if 'profile' in request.files and request.files['profile'].filename:
-            tmp_p = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            request.files['profile'].save(tmp_p.name)
-            tmp_p.close()
-            profile = extract_profile(tmp_p.name, resolution, radius, threshold)
-            os.unlink(tmp_p.name)
+        if request.files.get('profile'):
+            profile = extract_profile(request.files['profile'].stream, resolution, radius, threshold)
         elif request.form.get('pattern_profile'):
-            import json
-            prof_arr = np.array(json.loads(request.form.get('pattern_profile')), dtype=np.float64)
-            src = np.arange(len(prof_arr))
-            dst = np.linspace(0, len(prof_arr) - 1, resolution + 1)
-            profile = np.interp(dst, src, prof_arr) * radius
-            profile = np.maximum(profile, 1.0)
+            values = normalized_radii('pattern_profile')
+            profile = radius * np.maximum(.02, np.interp(
+                np.linspace(0, 1, resolution+1), np.linspace(0, 1, len(values)), values))
+        custom = None
+        if base_shape in ('custom', 'match_pattern') and request.form.get('custom_shape_radii'):
+            custom = np.maximum(.02, normalized_radii('custom_shape_radii', size=360))
 
-        # Total height: lower body (height) + upper hood (upper_shell_height)
-        has_upper_hood = keep_upper_shell or shell_shape == 'lantern'
-        total_height = height + (upper_shell_height if has_upper_hood else 0.0)
-        z_cutoff = total_height if has_upper_hood else bulb_height
+        lantern = request.form.get('shell_shape') == 'lantern'
+        hood = enabled('keep_upper_shell') or lantern
+        total_height = height + (upper_height if hood else 0)
+        litho = None
+        if request.files.get('litho_image'):
+            with Image.open(request.files['litho_image'].stream) as image:
+                image.thumbnail((4096, 2048), Image.Resampling.LANCZOS)
+                litho = np.asarray(image.convert('L'))
+        t_min = number('litho_min_thick', 1.2, .4, 10)
+        t_max = number('litho_max_thick', 3, .4, 10)
+        if litho is not None and t_min > t_max:
+            raise ValueError('Minimum relief thickness exceeds maximum thickness.')
 
-        # Mask (use lower res for mask → faster voxelization)
-        mask_res = min(resolution, 400)
         mask = build_cylinder_mask(
-            binary, n_phi=mask_res, n_z=mask_res,
-            R=radius, H=total_height, shadow_size=shadow_size,
-            bulb_height=bulb_height,
-            projection_mode=proj_mode, base_shape=base_shape,
-            keep_upper_shell=has_upper_hood,
-            upper_shell_height=upper_shell_height,
-            custom_shape_radii=custom_shape_radii,
-            support_count=support_count,
-            support_width=support_width)
+            coverage, resolution, resolution, radius, total_height, shadow_size,
+            bulb_height=bulb_height, smooth_sigma=.65, projection_mode=mode,
+            base_shape=base_shape, keep_upper_shell=hood, upper_shell_height=upper_height,
+            custom_shape_radii=custom, support_count=support_count,
+            support_width=support_width, profile_radii=profile, floor_offset=base)
 
-        # Manifold mesh
+        cutoff = total_height if hood or mode == 'wall' or support_count else min(bulb_height, total_height)
         mesh = build_manifold_mesh(
-            mask, R=radius, thickness=thickness,
-            H=total_height, base_thickness=bottom_thickness if with_bottom else 0,
-            bottom_hole_diam=bottom_hole_diam if with_bottom else 0,
-            profile_radii=profile, base_shape=base_shape,
-            z_cutoff=z_cutoff,
-            custom_shape_radii=custom_shape_radii,
-            with_top_hook=with_top_hook,
-            litho_gray=litho_gray, litho_min_thick=litho_min_thick,
-            litho_max_thick=litho_max_thick, litho_repeat=litho_repeat,
-            litho_invert=litho_invert, lower_body_height=height,
-            litho_width_scale=litho_width_scale,
-            litho_height_scale=litho_height_scale,
-            litho_offset=litho_offset)
-
+            mask, radius, thickness, total_height, base,
+            bottom_hole_diam=hole, profile_radii=profile, base_shape=base_shape,
+            z_cutoff=cutoff, custom_shape_radii=custom, with_top_hook=enabled('with_top_hook'),
+            roof_height=(10 if lantern else 5) if hood else 0,
+            litho_gray=litho, litho_min_thick=t_min, litho_max_thick=t_max,
+            litho_repeat=number('litho_repeat', 1, 1, 16, int),
+            litho_invert=enabled('litho_invert'),
+            lower_body_height=upper_shell_start(height, bulb_height, mode) if hood else total_height,
+            litho_width_scale=number('litho_width_scale', 100, 1, 500)/100,
+            litho_height_scale=number('litho_height_scale', 100, 1, 500)/100,
+            litho_offset=number('litho_offset', 0, -360, 360))
         mesh = smooth_and_decimate(mesh, target_faces=target_faces)
-
-        # Export STL
-        filename = f"shadow_lamp_{int(time.time())}.stl"
-        out_path = os.path.join(app.static_folder, filename)
-        mesh.export(out_path)
-
-        return jsonify(url=f"/api/download/{filename}")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify(error=str(e)), 500
-    finally:
-        os.unlink(tmp_img.name)
+        filename = f'shadow_lamp_{uuid4().hex}.stl'
+        expire_before = time.time() - _download_lifetime
+        for old in _export_dir.glob('shadow_lamp_*.stl'):
+            try:
+                if old.stat().st_mtime < expire_before:
+                    old.unlink()
+            except (FileNotFoundError, PermissionError):
+                # A concurrent request may have expired or may still be downloading it.
+                continue
+        mesh.export(_export_dir / filename)
+        return jsonify(url=f'/api/download/{filename}')
+    except (TypeError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as error:
+        return jsonify(error=str(error)), 400
 
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    import sys
+    from werkzeug.serving import make_server
+
+    httpd = make_server('127.0.0.1', 5000, app, threaded=True)
+    if '--open' in sys.argv:
+        import webbrowser
+        webbrowser.open('http://127.0.0.1:5000/')
+    print('Shadow Lamp is running at http://127.0.0.1:5000/', flush=True)
+    httpd.serve_forever()

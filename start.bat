@@ -1,28 +1,30 @@
 @echo off
+setlocal
 title Shadow Lamp Generator
 cd /d "%~dp0"
 
-set PY_EXE="C:\Users\ASUSTek\AppData\Local\Programs\Python\Python311\python.exe"
-
-if exist %PY_EXE% goto :run_server
-
-where python >nul 2>&1
-if %errorlevel% equ 0 (
-    set PY_EXE=python
-    goto :run_server
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import flask, trimesh, skimage, scipy, fast_simplification" >nul 2>&1
+    if not errorlevel 1 (
+        ".venv\Scripts\python.exe" server.py --open
+        goto :end
+    )
 )
-
-echo Python was not found. Opening standalone HTML version...
-start "" "%~dp0shadow_lamp.html"
-goto :end
-
-:run_server
-echo ========================================================
-echo  Starting Shadow Lamp Generator Server...
-echo  Opening http://127.0.0.1:5000 in your browser...
-echo ========================================================
-start "" http://127.0.0.1:5000
-%PY_EXE% server.py
+for %%P in ("%LocalAppData%\Programs\Python\Python311\python.exe" python) do (
+    "%%~P" -c "import flask, trimesh, skimage, scipy, fast_simplification" >nul 2>&1
+    if not errorlevel 1 (
+        "%%~P" server.py --open
+        goto :end
+    )
+)
+py -3 -c "import flask, trimesh, skimage, scipy, fast_simplification" >nul 2>&1
+if not errorlevel 1 (
+    py -3 server.py --open
+    goto :end
+)
+echo Opening the standalone generator. The full server requires the packages in requirements.txt.
+start "" "%~dp0shadow_lamp_fixed.html"
+exit /b
 
 :end
-pause
+if errorlevel 1 pause

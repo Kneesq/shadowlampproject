@@ -21,17 +21,16 @@ Required:
   pip install numpy Pillow scipy scikit-image trimesh fast-simplification flask
 """
 
-import argparse, os, sys, io, time
+import argparse, os, sys, time
 import numpy as np
-from PIL import Image, ImageDraw
-from scipy.ndimage import gaussian_filter
+from PIL import Image, ImageDraw, ImageOps
+from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.interpolate import RectBivariateSpline
 from skimage.measure import marching_cubes
 import trimesh
 
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 # ================================================================
@@ -41,16 +40,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
 def load_and_binarize(path, threshold=128, invert=False):
     """Load image (B&W, colored, or transparent PNG) → extract contour → binary mask.
     True = solid (shadow/opaque), False = hollow cutout (light passes through)."""
-    img = Image.open(path)
+    img = ImageOps.exif_transpose(Image.open(path))
+    img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
 
     # 1. Check alpha transparency (去背/透明PNG：直接取整体轮廓，不辨别内部黑白色)
     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
         img_rgba = img.convert('RGBA')
         alpha = np.array(img_rgba.getchannel('A'), dtype=np.uint8)
         if np.any(alpha < 200) and np.any(alpha > 20):
-            mask = alpha > 30
+            mask = alpha.astype(np.float32) / 255
             if invert:
-                mask = ~mask
+                mask = 1.0 - mask
             print(f"  Background-removed (Alpha) silhouette: {mask.shape[1]}x{mask.shape[0]} Solid: {mask.sum()/mask.size*100:.1f}%")
             return mask
 
@@ -73,16 +73,16 @@ def load_and_binarize(path, threshold=128, invert=False):
     # If substantial color/contrast variation exists from background
     if max_dist > 30.0:
         thresh_val = max(20.0, min(140.0, max_dist * (threshold / 255.0)))
-        mask = color_dist >= thresh_val
+        mask = np.clip(0.5 + (color_dist - thresh_val) / max(thresh_val * .3, 12), 0, 1)
         print(f"  Color contour binarized (bg={bg_color.round().astype(int)}): Solid: {mask.sum()/mask.size*100:.1f}%")
     else:
         # Fallback to standard grayscale threshold
         gray = np.array(img.convert('L'), dtype=np.uint8)
-        mask = gray < threshold
+        mask = np.clip(0.5 + (threshold - gray.astype(np.float32)) / 32, 0, 1)
         print(f"  Grayscale binarized: Solid: {mask.sum()/mask.size*100:.1f}%")
 
     if invert:
-        mask = ~mask
+        mask = 1.0 - mask
     return mask
 
 
@@ -113,12 +113,17 @@ def extract_profile(image_path, n_z, max_radius, threshold=128):
 # Ray Tracing → Smooth Float Mask
 # ================================================================
 
+def upper_shell_start(lower_height, bulb_height, projection_mode):
+    """Z where the patterned lower shell gives way to the solid upper side."""
+    return lower_height if projection_mode == 'wall' else min(bulb_height, lower_height)
+
+
 def build_cylinder_mask(binary_image, n_phi, n_z, R, H, shadow_size,
                         bulb_height=50.0, smooth_sigma=1.5,
                         projection_mode='floor', base_shape='circle',
                         keep_upper_shell=True, upper_shell_height=15.0,
                         custom_shape_radii=None,
-                        support_count=0, support_width=4.0):
+                        support_count=0, support_width=4.0, profile_radii=None, floor_offset=0):
     """
     Reverse ray-trace: shell surface → floor → image pixel.
     Returns smoothed float mask (n_z, n_phi) in [0, 1].
@@ -126,89 +131,47 @@ def build_cylinder_mask(binary_image, n_phi, n_z, R, H, shadow_size,
     custom_shape_radii: optional ndarray(360) of normalized per-angle radii.
     support_count: number of vertical support columns connecting base to top.
     """
-    ImgH, ImgW = binary_image.shape
-    h_light = bulb_height
-    sw, sh = shadow_size, shadow_size * ImgH / ImgW
-
-    z_c = (np.arange(n_z) + 0.5) / n_z * H
-    phi_c = (np.arange(n_phi) + 0.5) / n_phi * 2 * np.pi
-    Z, PHI = np.meshgrid(z_c, phi_c, indexing='ij')
-
-    # Per-angle scale factor
-    if custom_shape_radii is not None and len(custom_shape_radii) > 0:
-        # Interpolate from 360-entry radii array
-        angle_deg = (PHI * 180.0 / np.pi) % 360.0
-        idx0 = np.floor(angle_deg).astype(int) % 360
-        idx1 = (idx0 + 1) % 360
-        frac = angle_deg - np.floor(angle_deg)
-        scale = custom_shape_radii[idx0] * (1 - frac) + custom_shape_radii[idx1] * frac
+    img_h, img_w = binary_image.shape
+    image = np.asarray(binary_image, dtype=np.float32)
+    z = ((np.arange(n_z, dtype=np.float32) + .5) * H / n_z)[:, None]
+    phi = (np.arange(n_phi, dtype=np.float32) + .5) * (2 * np.pi / n_phi)
+    radii = R if profile_radii is None else np.interp(
+        z, np.linspace(0, H, len(profile_radii)), profile_radii)
+    if custom_shape_radii is not None:
+        scale = np.interp(phi, np.arange(len(custom_shape_radii)) * (2*np.pi/len(custom_shape_radii)),
+                          custom_shape_radii, period=2*np.pi)
     else:
-        n_sides = {'triangle': 3, 'square': 4, 'pentagon': 5, 'hexagon': 6}.get(base_shape, 0)
-        scale = np.ones_like(PHI)
-        if n_sides >= 3:
-            seg = 2 * np.pi / n_sides
-            scale = 1.0 / np.cos(((PHI + seg / 2.0) % seg) - seg / 2.0)
-
-    mask = np.zeros((n_z, n_phi), dtype=np.float64)
-
-    if projection_mode == 'wall':
-        u_f = PHI / (2 * np.pi) * ImgW
-        v_f = (1.0 - Z / H) * ImgH
-        u_i = np.clip(np.round(u_f).astype(int), 0, ImgW - 1)
-        v_i = np.clip(np.round(v_f).astype(int), 0, ImgH - 1)
-        mask = binary_image[v_i, u_i].astype(float)
-    else:
-        below = Z < (h_light - 1e-6)
-        t = np.where(below, h_light / np.maximum(h_light - Z, 1e-9), 0.0)
-        Rsc = R * scale
-        xf, yf = Rsc * np.cos(PHI) * t, Rsc * np.sin(PHI) * t
-        u = np.round((xf / sw + 0.5) * ImgW).astype(int)
-        v = np.round((yf / sh + 0.5) * ImgH).astype(int)
-        ok = below & (u >= 0) & (u < ImgW) & (v >= 0) & (v < ImgH)
-        mask[ok] = binary_image[v[ok], u[ok]].astype(float)
-        if keep_upper_shell:
-            # Full solid upper lantern hood from bulb_height up to h_light + upper_shell_height
-            solid_top_z = min(h_light + upper_shell_height, H)
-            for i in range(n_z):
-                if z_c[i] >= h_light - 1e-6:
-                    mask[i, :] = 1.0 if z_c[i] < solid_top_z else 0.0
+        sides = {'triangle': 3, 'square': 4, 'pentagon': 5, 'hexagon': 6}.get(base_shape)
+        if sides:
+            angle = 2 * np.pi / sides
+            scale = 1 / np.cos((phi + angle / 2) % angle - angle / 2)
         else:
-            # No upper shell: zero everything at or above h_light
-            for i in range(n_z):
-                if z_c[i] >= h_light - 1e-6:
-                    mask[i, :] = 0.0
+            scale = 1
 
-    # Support columns connecting base upward to top lantern roof
+    lower_height = max(.1, H - upper_shell_height) if keep_upper_shell else H
+    if projection_mode == 'wall':
+        u, v = np.broadcast_arrays(phi * (img_w / (2*np.pi)) - .5, (1-z/lower_height) * img_h - .5)
+        # Repeat angular samples across the seam and clamp vertical samples at the rim.
+        pad_image = np.pad(image, ((0, 0), (1, 1)), mode='wrap')
+        mask = map_coordinates(pad_image, [v, u+1], order=1, mode='nearest')
+    else:
+        t = (bulb_height + floor_offset) / np.maximum(bulb_height - z, .0001)
+        r = radii * scale * t
+        u = (.5 + r * np.cos(phi) / shadow_size) * img_w - .5
+        v = (.5 + r * np.sin(phi) / (shadow_size * img_h / img_w)) * img_h - .5
+        mask = map_coordinates(image, [v, u], order=1, mode='grid-constant', cval=0)
+        mask[z[:, 0] >= bulb_height] = 0
+    mask_out = gaussian_filter(mask, sigma=smooth_sigma, mode=('nearest', 'wrap'))
+    if keep_upper_shell:
+        hood_start = upper_shell_start(lower_height, bulb_height, projection_mode)
+        mask_out[z[:, 0] >= hood_start] = 1
     if support_count > 0:
-        angle_step = (2 * np.pi) / support_count
-        for k in range(support_count):
-            target_phi = k * angle_step
-            diff = np.abs(phi_c - target_phi)
-            diff = np.minimum(diff, 2 * np.pi - diff)
-            col_indices = np.where(diff < (support_width / 2.0) / R)[0]
-            if len(col_indices) > 0:
-                mask[:, col_indices] = 1.0
-
-    # Force bottom solid rings
-    for row in range(min(3, n_z)):
-        mask[row, :] = 1.0
-
-    # Gaussian blur (periodic in phi)
-    pad = max(2, int(smooth_sigma * 3))
-    padded = np.concatenate([mask[:, -pad:], mask, mask[:, :pad]], axis=1)
-    blurred = gaussian_filter(padded, sigma=smooth_sigma)
-    mask_out = blurred[:, pad:-pad]
-
-    # Re-enforce cutoff after blur
-    if projection_mode != 'wall':
-        for i in range(n_z):
-            if z_c[i] >= h_light - 1e-6:
-                if keep_upper_shell:
-                    solid_top_z = min(h_light + upper_shell_height, H)
-                    mask_out[i, :] = 1.0 if z_c[i] < solid_top_z else 0.0
-                else:
-                    mask_out[i, :] = 0.0
-
+        step = 2 * np.pi / support_count
+        distance = np.abs((phi + step/2) % step - step/2) * radii * scale
+        support = np.clip(.5 + (support_width / 2 - distance) / (2 * np.pi * R / n_phi), 0, 1)
+        mask_out = np.maximum(mask_out, support)
+    # A complete first ring joins the wall to the plate.
+    mask_out[:max(1, int(np.ceil(.5 * n_z / H)))] = 1
     s = (mask_out > 0.5).sum()
     print(f"  Mask: {n_z}x{n_phi}  Solid: {s}/{mask_out.size}")
     return mask_out
@@ -227,7 +190,7 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
                         litho_max_thick=2.8, litho_repeat=1,
                         litho_invert=False, lower_body_height=None,
                         litho_width_scale=1.0, litho_height_scale=1.0,
-                        litho_offset=0.0):
+                        litho_offset=0.0, roof_height=0.0):
     """
     Voxelize shell+base, then marching cubes → guaranteed manifold.
     Processes z-slices for memory efficiency.
@@ -237,15 +200,11 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
     with_top_hook: if True, adds a 3D hanging hook loop at the top apex.
     litho_gray: optional 2D ndarray grayscale image for 360° lithophane relief.
     """
-    min_wall_t = litho_min_thick if litho_gray is not None else thickness
-    if voxel_size is None:
-        if litho_gray is not None:
-            # Fine voxel step for lithophane relief to prevent thin wall pinching & capture sharp details
-            voxel_size = round(max(0.32, min(0.42, min_wall_t / 2.0)), 2)
-        else:
-            voxel_size = round(max(0.4, min(1.0, thickness / 3.0)), 2)
-
     n_z_mask, n_phi_mask = mask_smooth.shape
+    min_wall = min(thickness, litho_min_thick) if litho_gray is not None else thickness
+    if voxel_size is None:
+        arc_step = 2 * np.pi * R / n_phi_mask
+        voxel_size = min(min_wall / 3, max(.20, min(arc_step, .75)))
 
     # Per-angle scale: custom shape or polygon
     use_custom = custom_shape_radii is not None and len(custom_shape_radii) > 0
@@ -258,16 +217,25 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
     if lower_body_height is None:
         lower_body_height = H
 
-    # Bounding box
-    max_R = R * 1.5 if (use_custom or n_sides >= 3) else R
-    if litho_gray is not None:
-        max_R += litho_max_thick
-    margin = max_R + thickness + voxel_size * 2
-    x = np.arange(-margin, margin, voxel_size, dtype=np.float32)
-    y = np.arange(-margin, margin, voxel_size, dtype=np.float32)
-    z_min = -base_thickness if base_thickness > 0 else 0.0
-    # Pad 1 voxel below z_min and 2 voxels above H so marching cubes closes rims cleanly into a watertight solid
-    z = np.arange(z_min - voxel_size, H + voxel_size * 2, voxel_size, dtype=np.float32)
+    max_scale = (float(np.max(custom_radii_arr)) if use_custom else
+                 1 / np.cos(np.pi / n_sides) if n_sides else 1)
+    outer = max(R, max(profile_radii) if profile_radii is not None else R)
+    max_radius = (outer + max(thickness, litho_max_thick if litho_gray is not None else 0)) * max_scale
+    body_top = min(H, z_cutoff) if z_cutoff is not None else H
+    apex = body_top + roof_height
+    hook_active = with_top_hook and roof_height > 0
+    z_top = apex + (13 if hook_active else 0)
+    z_min = -base_thickness
+    # Bound the full marching-cubes volume at high resolution / large diameters.
+    min_step = ((2*max_radius)**2 * (z_top - z_min) / 24000000) ** (1/3)
+    voxel_size = max(voxel_size, min_step)
+    z_step = min(voxel_size, body_top / 3)
+    # For flat stencils refine just Z. Account for the base plate in that budget.
+    voxel_size = max(voxel_size, 2 * max_radius * np.sqrt((z_top-z_min) / z_step / 24000000))
+    margin = max_radius + voxel_size * 2
+    x = np.arange(-margin, margin + voxel_size, voxel_size, dtype=np.float32)
+    y = x
+    z = np.arange(np.floor(z_min/z_step)-2, np.ceil(z_top/z_step)+3, dtype=np.float32) * z_step
 
     nx, ny, nz = len(x), len(y), len(z)
     print(f"  Voxel: {nx}x{ny}x{nz} = {nx*ny*nz/1e6:.1f}M "
@@ -309,8 +277,25 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
         [pc[-pad:] - 2 * np.pi, pc, pc[:pad] + 2 * np.pi])
     interp = RectBivariateSpline(zc, phi_pad, mask_pad, kx=1, ky=1)
 
-    R_out_base = R + thickness  # constant for base cylinder
+    R_out_base = (profile_radii[0] if profile_radii is not None else R) + thickness  # constant for base cylinder
     hole_r = max(0, bottom_hole_diam / 2.0) if bottom_hole_diam > 0 else 0
+
+    if litho_gray is not None:
+        # A full-width panel repeats at the cylinder seam. Sample pixel centers,
+        # interpolating the last and first columns on either side of the seam.
+        panel_height, panel_width = litho_gray.shape
+        phase = ((phi_2d - np.deg2rad(litho_offset)) * litho_repeat / (2*np.pi)) % 1.0
+        panel_u = (phase - .5) / litho_width_scale + .5
+        in_panel = (panel_u >= 0) & (panel_u <= 1)
+        pixel_x = panel_u * panel_width - .5
+        left = np.floor(pixel_x).astype(np.intp)
+        x_weight = pixel_x - left
+        if litho_width_scale == 1.0:
+            right = (left + 1) % panel_width
+            left %= panel_width
+        else:
+            right = np.clip(left + 1, 0, panel_width - 1)
+            left = np.clip(left, 0, panel_width - 1)
 
     volume = np.zeros((nx, ny, nz), dtype=np.float32)
 
@@ -329,33 +314,27 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
             volume[:, :, k] = np.maximum(volume[:, :, k], plate_field)
 
         # Shell: wall region with mask lookup or lithophane relief
-        if 0.0 <= zv <= H:
+        if 0.0 <= zv <= body_top:
             if profile_radii is not None:
                 R_here = float(np.interp(zv, prof_z, profile_radii))
             else:
                 R_here = R
             if litho_gray is not None and zv >= lower_body_height - 1e-4:
-                # Upper shell: Lithophane relief thickness modulation with continuous sub-voxel distance field
-                upper_h = max(H - lower_body_height, 1.0)
-                offset_rad = float(litho_offset) * np.pi / 180.0
-                phi_norm = (((phi_2d - offset_rad) / (2 * np.pi) * litho_repeat) % 1.0 + 1.0) % 1.0
-                u_frac = (phi_norm - 0.5) / max(litho_width_scale, 0.05) + 0.5
-                y_norm = np.clip((zv - lower_body_height) / upper_h, 0.0, 1.0)
-                v_frac = (y_norm - 0.5) / max(litho_height_scale, 0.05) + 0.5
-
-                in_u = (u_frac >= 0.0) & (u_frac <= 1.0)
-                in_v = (v_frac >= 0.0) & (v_frac <= 1.0)
-                in_photo = in_u & in_v
-
-                t_vals = np.full_like(phi_2d, litho_min_thick, dtype=float)
-                if in_photo.any():
-                    u_px = np.clip(np.round(u_frac * (litho_gray.shape[1] - 1)).astype(int), 0, litho_gray.shape[1] - 1)
-                    v_px = int(np.clip(round((1.0 - v_frac) * (litho_gray.shape[0] - 1)), 0, litho_gray.shape[0] - 1))
-                    g_vals = litho_gray[v_px, u_px].astype(float)
-                    if litho_invert:
-                        g_vals = 255.0 - g_vals
-                    calc_t = litho_min_thick + (1.0 - g_vals / 255.0) * (litho_max_thick - litho_min_thick)
-                    t_vals = np.where(in_photo, calc_t, litho_min_thick)
+                span = max(H - lower_body_height, 1e-6)
+                side_v = np.clip((zv - lower_body_height) / span, 0, 1)
+                panel_v = (side_v - .5) / litho_height_scale + .5
+                t_vals = litho_min_thick
+                if 0 <= panel_v <= 1:
+                    pixel_y = (1 - panel_v) * (panel_height - 1)
+                    top = int(np.floor(pixel_y))
+                    bottom = min(top + 1, panel_height - 1)
+                    y_weight = pixel_y - top
+                    # Only two 1D source rows are needed per horizontal mesh slice.
+                    row = litho_gray[top] * (1 - y_weight) + litho_gray[bottom] * y_weight
+                    gray = row[left] * (1 - x_weight) + row[right] * x_weight
+                    darkness = gray / 255 if litho_invert else 1 - gray / 255
+                    relief = litho_min_thick + darkness * (litho_max_thick - litho_min_thick)
+                    t_vals = np.where(in_panel, relief, litho_min_thick)
 
                 R_out_here = R_here + t_vals
                 d_in = (r_canonical_2d - R_here) * scale_2d
@@ -378,55 +357,61 @@ def build_manifold_mesh(mask_smooth, R, thickness, H, base_thickness,
                     v_slice = volume[:, :, k]
                     v_slice[active] = np.maximum(v_slice[active], wall_field[active] * vals)
 
+        if roof_height and body_top - min_wall <= zv <= apex:
+            # Hollow cone joined to the upper rim, with a solid tip for the hook.
+            rim_radius = (profile_radii[-1] if profile_radii is not None else R)
+            roof_r = (rim_radius + thickness) * np.clip((apex-zv) / roof_height, 0, 1)
+            outside = (roof_r - r_canonical_2d) * scale_2d
+            lower_face = zv - (apex - min_wall - roof_height * r_canonical_2d / (rim_radius+thickness))
+            roof_field = .5 + np.minimum(outside / voxel_size, lower_face / z_step)
+            volume[:, :, k] = np.maximum(volume[:, :, k], np.clip(roof_field, 0, 1))
+        if hook_active and apex - 2 <= zv <= apex + 13:
+            # Union the pedestal and torus in the same scalar field to create a joined mesh.
+            pedestal = np.minimum(3.5 - r_2d, np.minimum(zv - apex + 2, apex + 3.5 - zv))
+            torus = 1.3 - np.hypot(np.hypot(X2D, zv - apex - 6) - 5, Y2D)
+            hook = np.clip(.5 + np.maximum(pedestal, torus) / voxel_size, 0, 1)
+            volume[:, :, k] = np.maximum(volume[:, :, k], hook)
+
     # Marching cubes
     print(f"  Marching cubes...")
     t0 = time.time()
     verts, faces, _, _ = marching_cubes(
         volume, level=0.5,
-        spacing=(voxel_size, voxel_size, voxel_size))
+        spacing=(voxel_size, voxel_size, z_step), allow_degenerate=False)
     verts += [x[0], y[0], z[0]]
     # Flip Y axis to match Three.js preview (Y-up vs Z-up handedness)
     verts[:, 1] = -verts[:, 1]
     dt = time.time() - t0
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-    mesh.invert()  # flipping an axis reverses winding → invert to fix normals
     mesh.merge_vertices()
-
-    # Z-plane trim: slice off any geometry above z_cutoff
-    if z_cutoff is not None and z_cutoff < H - 1e-3:
-        print(f"  Trimming top at Z={z_cutoff:.1f}mm...")
-        try:
-            sliced = mesh.slice_plane(
-                plane_origin=[0, 0, z_cutoff],
-                plane_normal=[0, 0, -1],  # keep below
-                cap=True)
-            if sliced is not None and len(sliced.faces) > 0:
-                mesh = sliced
-                mesh.merge_vertices()
-        except Exception as e:
-            print(f"  Warning during slice_plane: {e}")
-
-    # Top hanging hook (挂钩)
-    if with_top_hook:
-        z_hook_base = z_cutoff if z_cutoff is not None else H
-        print(f"  Adding top hanging hook at Z={z_hook_base:.1f}mm...")
-        try:
-            # Torus ring for hanging
-            torus = trimesh.creation.torus(major_radius=5.0, minor_radius=1.3, minor_sections=24, major_sections=24)
-            rot_mat = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
-            torus.apply_transform(rot_mat)
-            torus.apply_translation([0, 0, z_hook_base + 6.0])
-
-            # Pedestal connecting top cap to hook loop
-            pedestal = trimesh.creation.cylinder(radius=3.5, height=3.0, sections=24)
-            pedestal.apply_translation([0, 0, z_hook_base + 1.5])
-
-            hook_mesh = trimesh.util.concatenate([pedestal, torus])
-            mesh = trimesh.util.concatenate([mesh, hook_mesh])
-            mesh.merge_vertices()
-        except Exception as e:
-            print(f"  Warning adding hook: {e}")
+    # An ambiguous voxel near the stencil edge can create a separate, sub-voxel
+    # octahedron. Remove only tiny disconnected components, never a thin limb
+    # connected to the main silhouette or a distinct full-size design element.
+    edges = mesh.edges_unique
+    graph = coo_matrix((np.ones(len(edges), dtype=np.uint8), edges.T),
+                       shape=(len(mesh.vertices), len(mesh.vertices)))
+    count, labels = connected_components(graph, directed=False)
+    if count > 1:
+        face_labels = labels[mesh.faces[:, 0]]
+        counts = np.bincount(face_labels)
+        tiny = counts <= 16
+        vertices_to_check = tiny[labels]
+        if vertices_to_check.any():
+            checked_labels = labels[vertices_to_check]
+            points = mesh.vertices[vertices_to_check]
+            low = np.full((count, 3), np.inf)
+            high = -low
+            np.minimum.at(low, checked_labels, points)
+            np.maximum.at(high, checked_labels, points)
+            discard = tiny & ((high - low).max(axis=1) <= voxel_size)
+            keep = ~discard[face_labels]
+            if keep.any() and not keep.all():
+                mesh.update_faces(keep)
+                mesh.remove_unreferenced_vertices()
+    del graph, edges
+    if mesh.volume < 0:
+        mesh.invert()
 
     if not mesh.is_watertight:
         trimesh.repair.fill_holes(mesh)
@@ -454,9 +439,20 @@ def smooth_and_decimate(mesh, target_faces=300000, smooth_iter=2):
         import fast_simplification
         verts_out, faces_out = fast_simplification.simplify(
             mesh.vertices, mesh.faces, target_reduction=ratio)
-        mesh = trimesh.Trimesh(vertices=verts_out, faces=faces_out)
-        mesh.merge_vertices()
-        mesh.fix_normals()
+        # STL stores float32 vertices. Check topology at that precision because
+        # a quadric collapse can merge distinct sides of a narrow cut.
+        candidate = trimesh.Trimesh(vertices=verts_out.astype(np.float32), faces=faces_out,
+                                    validate=True)
+        if candidate.is_watertight and candidate.is_winding_consistent and candidate.volume > 0:
+            mesh = candidate
+        else:
+            print("  Retaining the full mesh to preserve closed contours.")
+
+    # Weld at export precision before verifying the actual STL topology.
+    mesh = trimesh.Trimesh(vertices=mesh.vertices.astype(np.float32), faces=mesh.faces,
+                           validate=True)
+    if not mesh.is_watertight or not mesh.is_winding_consistent:
+        raise ValueError("The selected dimensions produce an open mesh. Increase wall thickness or resolution.")
 
     print(f"  Final: {len(mesh.faces)} faces  "
           f"Watertight: {mesh.is_watertight}")
@@ -608,20 +604,20 @@ def main():
     print(f"\n[1/4] Loading: {args.image}")
     binary = load_and_binarize(args.image, args.threshold, args.invert)
 
+    profile = None
+    if args.profile:
+        profile = extract_profile(args.profile, args.resolution, args.radius)
+
     # 2. Mask
     print(f"\n[2/4] Ray tracing (res={args.resolution})")
     mask = build_cylinder_mask(
         binary, n_phi=args.resolution, n_z=args.resolution,
         R=args.radius, H=args.height, shadow_size=args.shadow_size,
         bulb_height=args.bulb_height,
-        smooth_sigma=args.smooth_sigma, base_shape=args.base_shape)
+        smooth_sigma=args.smooth_sigma, base_shape=args.base_shape,
+        profile_radii=profile, floor_offset=args.base_thickness)
 
-    # 3. Profile
-    profile = None
-    if args.profile:
-        profile = extract_profile(args.profile, args.resolution, args.radius)
-
-    # 4. Mesh
+    # Mesh
     print(f"\n[3/4] Voxelize + marching cubes")
     mesh = build_manifold_mesh(
         mask, R=args.radius, thickness=args.thickness,

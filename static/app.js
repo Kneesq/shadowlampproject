@@ -39,8 +39,7 @@ const lithoEnable           = document.getElementById('lithoEnable');
 const lithoZone             = document.getElementById('lithoZone');
 const lithoInput            = document.getElementById('lithoInput');
 const lithoStatus           = document.getElementById('lithoStatus');
-const lithoHeight           = document.getElementById('lithoHeight');
-const lithoHeightVal        = document.getElementById('lithoHeightVal');
+const reliefSpan            = document.getElementById('reliefSpan');
 const lithoFlatCanvas       = document.getElementById('lithoFlatCanvas');
 const canvasPlaceholder     = document.getElementById('canvasPlaceholder');
 const btnAddMoreLitho       = document.getElementById('btnAddMoreLitho');
@@ -60,7 +59,9 @@ const lithoMaxThickVal      = document.getElementById('lithoMaxThickVal');
 const lithoRepeat           = document.getElementById('lithoRepeat');
 const lithoInvert           = document.getElementById('lithoInvert');
 
-let lithoFile = null;
+let activeExport = null;
+let layerGeneration = 0;
+let layerUploadQueue = Promise.resolve();
 let lithoData = null; // { width, height, data: Uint8Array }
 let lithoLayers = [];
 let selectedLithoLayerId = null;
@@ -71,7 +72,7 @@ const S = {
   brightness:       { el: document.getElementById('brightness'),       vEl: document.getElementById('brightnessVal'),       fmt: v => `${parseFloat(v).toFixed(1)}x` },
   bulbHeight:       { el: document.getElementById('bulbHeight'),       vEl: document.getElementById('bulbHeightVal'),       fmt: v => `${v} mm` },
   diameter:         { el: document.getElementById('diameter'),         vEl: document.getElementById('diameterVal'),         fmt: v => `${v} mm` },
-  height:           { el: document.getElementById('height'),           vEl: document.getElementById('heightVal'),           fmt: v => v === '0' ? '0 mm (Stencil)' : `${v} mm` },
+  height:           { el: document.getElementById('height'),           vEl: document.getElementById('heightVal'),           fmt: v => v === '0' ? '0 mm（模板）' : `${v} mm` },
   thickness:        { el: document.getElementById('thickness'),        vEl: document.getElementById('thicknessVal'),        fmt: v => `${parseFloat(v).toFixed(1)} mm` },
   shadowSize:       { el: document.getElementById('shadowSize'),       vEl: document.getElementById('shadowSizeVal'),       fmt: v => `${v} mm` },
   resolution:       { el: document.getElementById('resolution'),       vEl: document.getElementById('resolutionVal'),       fmt: v => v },
@@ -85,9 +86,12 @@ const S = {
 // State
 // ============================================================
 let uploadedFile = null;
+let silhouetteMaskBlob = null;
+let uploadEpoch = 0;
 let profileFile  = null;
 let imageData    = null;  // { width, height, data: Uint8Array grayscale }
 let profileData  = null;  // Float32Array of radii (normalized 0-1)
+let needsCameraFit = true;
 let previewMesh  = null;
 let debounce     = null;
 
@@ -107,13 +111,14 @@ const matchPatternStatus  = document.getElementById('matchPatternStatus');
 // Three.js Scene
 // ============================================================
 const scene    = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0e1a);
+scene.background = new THREE.Color(0xd9e0d7);
 
 const camera   = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
 camera.position.set(0, 180, 250);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.shadowMap.enabled = true;
+renderer.shadowMap.autoUpdate = false;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 viewport.appendChild(renderer.domElement);
@@ -123,16 +128,34 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.target.set(0, 40, 0);
 
+let renderPending = false;
+function requestRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => {
+    renderPending = false;
+    controls.update();
+    renderer.render(scene, camera);
+  });
+}
+controls.addEventListener('change', requestRender);
+
 // Lights
 const ptLight = new THREE.PointLight(0xfff4e0, 6, 2000, 0.3);
 ptLight.castShadow = true;
-ptLight.shadow.mapSize.set(4096, 4096);
+const shadowSize = Math.min(2048, Math.floor(renderer.capabilities.maxTextureSize / 4));
+ptLight.shadow.mapSize.set(shadowSize, shadowSize);
+ptLight.shadow.bias = -0.00004;
+ptLight.shadow.normalBias = 0.035;
 ptLight.shadow.camera.near = 10;
 ptLight.shadow.camera.far = 400;
 ptLight.shadow.radius = 1.5;
 scene.add(ptLight);
 const ambLight = new THREE.AmbientLight(0x334466, 0.4);
 scene.add(ambLight);
+const studioLight = new THREE.DirectionalLight(0xfff2da, 0.74);
+studioLight.position.set(-120, 180, 160);
+scene.add(studioLight);
 
 // Bulb indicator
 const bulb = new THREE.Mesh(
@@ -153,19 +176,24 @@ const wallMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9
 const wallMesh = new THREE.Mesh(new THREE.CylinderGeometry(300, 300, 400, 64), wallMat);
 wallMesh.position.y = 100;
 wallMesh.receiveShadow = true;
+wallMesh.visible = false;
 scene.add(wallMesh);
 
 const grid = new THREE.GridHelper(800, 40, 0x1a2440, 0x111827);
+grid.material.transparent = true;
+grid.material.opacity = 0.22;
+grid.material.depthWrite = false;
 scene.add(grid);
 
 function updateLightPos() {
-  const H = parseFloat(S.height.el.value);
   const brightness = parseFloat(S.brightness.el.value);
   const bulbH = parseFloat(S.bulbHeight.el.value);
   ptLight.position.set(0, bulbH, 0);
   ptLight.intensity = brightness * 2;
   ptLight.distance = 600 + brightness * 200;
   ambLight.intensity = 0.2 + brightness * 0.08;
+  renderer.shadowMap.needsUpdate = true;
+  requestRender();
   bulb.position.copy(ptLight.position);
   bulb.scale.setScalar(0.5 + brightness * 0.3);
 }
@@ -176,18 +204,15 @@ updateLightPos();
 // ============================================================
 function resize() {
   const w = viewport.clientWidth, h = viewport.clientHeight;
+  if (!w || !h) return;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  requestRender();
 }
 resize();
-window.addEventListener('resize', resize);
+new ResizeObserver(resize).observe(viewport);
 
-(function loop() {
-  requestAnimationFrame(loop);
-  controls.update();
-  renderer.render(scene, camera);
-})();
 
 // ============================================================
 // Shell shape toggle
@@ -201,6 +226,14 @@ if (topHookToggle) topHookToggle.addEventListener('change', scheduleUpdate);
 // ============================================================
 // 360° Unwrapped Lithophane Flat Canvas Studio
 // ============================================================
+function lanternReliefHeight() {
+  const upperHeight = Number(S.upperShellHeight.el.value);
+  if (!document.getElementById('projFloor').checked) return upperHeight;
+  const lowerHeight = Math.max(0.1, Number(S.height.el.value));
+  const bulbHeight = Number(S.bulbHeight.el.value);
+  return upperHeight + Math.max(0, lowerHeight - bulbHeight);
+}
+
 function updateLayerInfoBadge(layer, circ, upperH) {
   if (!lithoLayerInfo) return;
   if (!layer) {
@@ -220,9 +253,10 @@ function renderLithoFlatCanvas(extractBuffer = true) {
   if (!lithoFlatCanvas) return;
 
   const R = parseFloat(S.diameter.el.value) / 2;
-  const upperH = parseFloat(S.upperShellHeight.el.value) || 50;
+  const upperH = lanternReliefHeight();
+  if (reliefSpan) reliefSpan.textContent = Number(upperH.toFixed(1)) + ' mm';
   const circ = 2 * Math.PI * R;
-  const aspect = circ / Math.max(upperH, 1.0);
+  const aspect = circ / Math.max(upperH, 1);
   const W = 1024;
   const H = Math.round(Math.max(160, Math.min(384, W / aspect)));
 
@@ -237,6 +271,7 @@ function renderLithoFlatCanvas(extractBuffer = true) {
 
   // 1. Offscreen PURE composite (pure white base + all layers)
   const offCtx = lithoCanvasOffscreen.getContext('2d');
+  offCtx.imageSmoothingQuality = 'high';
   offCtx.fillStyle = '#ffffff';
   offCtx.fillRect(0, 0, W, H);
 
@@ -246,14 +281,12 @@ function renderLithoFlatCanvas(extractBuffer = true) {
 
   // 2. Extract grayscale buffer for 3D preview & STL
   if (extractBuffer && lithoLayers.length > 0) {
-    const imgData = offCtx.getImageData(0, 0, W, H);
-    const px = imgData.data;
+    const pixels = offCtx.getImageData(0, 0, W, H).data;
     const gray = new Uint8Array(W * H);
-    for (let i = 0; i < W * H; i++) {
-      gray[i] = Math.round(0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]);
-    }
+    for (let i = 0; i < gray.length; i++) gray[i] = pixels[i * 4];
     lithoData = { width: W, height: H, data: gray };
-    if (!imageData) imageData = lithoData;
+  } else if (!lithoLayers.length) {
+    lithoData = null;
   }
 
   // 3. Visible canvas rendering
@@ -299,16 +332,8 @@ function drawLayerToContext(ctx, layer, W, H) {
   const ly = layer.y * H;
   const lw = layer.w * W;
   const lh = layer.h * H;
-  const src = layer.canvas || layer.img;
-
-  ctx.drawImage(src, lx, ly, lw, lh);
-  // Seamless 360 wrap around horizontal seam
-  if (lx + lw > W) {
-    ctx.drawImage(src, lx - W, ly, lw, lh);
-  }
-  if (lx < 0) {
-    ctx.drawImage(src, lx + W, ly, lw, lh);
-  }
+  ctx.drawImage(layer.canvas, lx, ly, lw, lh);
+  if (lx + lw > W) ctx.drawImage(layer.canvas, lx - W, ly, lw, lh);
 }
 
 function drawLayerSelection(ctx, layer, W, H) {
@@ -350,97 +375,68 @@ function drawLayerSelection(ctx, layer, W, H) {
 
   drawBox(lx, ly);
   if (lx + lw > W) drawBox(lx - W, ly);
-  if (lx < 0) drawBox(lx + W, ly);
 }
 
-function addLithoLayerFromDataUrl(name, dataUrl) {
-  const img = new Image();
-  img.onload = () => {
-    const origW = img.naturalWidth || img.width;
-    const origH = img.naturalHeight || img.height;
-    const aspect = origW / origH;
-
-    const layerCanvas = document.createElement('canvas');
-    layerCanvas.width = origW;
-    layerCanvas.height = origH;
-    const lctx = layerCanvas.getContext('2d');
-    lctx.drawImage(img, 0, 0);
-
-    const imgData = lctx.getImageData(0, 0, origW, origH);
-    const px = imgData.data;
-
-    // Check transparency
-    let hasAlpha = false;
-    let transCount = 0, opaqueCount = 0;
-    for (let i = 0; i < px.length; i += 4) {
-      if (px[i + 3] < 200) transCount++;
-      if (px[i + 3] > 20) opaqueCount++;
-    }
-    if (transCount > 20 && opaqueCount > 20) hasAlpha = true;
-
-    if (hasAlpha) {
-      for (let i = 0; i < px.length; i += 4) {
-        const a = px[i + 3];
-        const val = a > 30 ? 0 : 255;
-        px[i] = val;
-        px[i + 1] = val;
-        px[i + 2] = val;
-        px[i + 3] = 255;
-      }
-    } else {
-      for (let i = 0; i < px.length; i += 4) {
-        const g = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
-        px[i] = g;
-        px[i + 1] = g;
-        px[i + 2] = g;
-        px[i + 3] = 255;
+function addLithoFiles(files) {
+  const generation = layerGeneration;
+  const picked = Array.from(files);
+  layerUploadQueue = layerUploadQueue.then(async () => {
+    for (const file of picked) {
+      if (generation !== layerGeneration) return;
+      try {
+        await addLithoLayer(file, generation);
+      } catch (error) {
+        if (generation !== layerGeneration) return;
+        lithoStatus.style.display = 'flex';
+        lithoStatus.className = 'custom-shape-status error';
+        lithoStatus.textContent = '无法读取图案 ' + file.name;
+        console.warn('Relief image could not be loaded:', error);
       }
     }
-    lctx.putImageData(imgData, 0, 0);
+  });
+}
 
-    const R = parseFloat(S.diameter.el.value) / 2;
-    const upperH = parseFloat(S.upperShellHeight.el.value) || 50;
-    const circ = 2 * Math.PI * R;
-    const canvasAspect = circ / Math.max(upperH, 1.0);
-
-    const initH = 0.75;
-    let initW = initH * aspect / canvasAspect;
-    if (initW > 0.7) initW = 0.7;
-    if (initW < 0.08) initW = 0.08;
-
-    let initX = 0.5 - initW / 2;
-    if (lithoLayers.length > 0) {
-      const last = lithoLayers[lithoLayers.length - 1];
-      initX = (last.x + last.w + 0.04) % 1.0;
+async function addLithoLayer(file, generation) {
+  const image = await createImageBitmap(file);
+  try {
+    if (generation !== layerGeneration) return;
+    const aspect = image.width / image.height;
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 2048 / Math.max(image.width, image.height));
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    const context = canvas.getContext('2d');
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const raster = context.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = raster.data;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const gray = Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]);
+      pixels[i] = pixels[i + 1] = pixels[i + 2] = gray;
     }
-    let initY = (1.0 - initH) / 2;
+    context.putImageData(raster, 0, 0);
 
+    const last = lithoLayers.at(-1);
     const layerId = nextLithoLayerId++;
-    const layer = {
-      id: layerId,
-      name: name || `图案 ${layerId}`,
-      img: img,
-      canvas: layerCanvas,
-      x: initX,
-      y: initY,
-      w: initW,
-      h: initH,
-      origAspect: aspect
-    };
-
+    const layer = { id: layerId, name: file.name, canvas, x: 0, y: 0, w: 1, h: 1 };
+    if (last) {
+      const circumference = Math.PI * Number(S.diameter.el.value);
+      layer.h = 0.75;
+      layer.w = Math.max(0.08, Math.min(0.7, layer.h * aspect * lanternReliefHeight() / circumference));
+      layer.x = (last.x + last.w + 0.04) % 1;
+      layer.y = (1 - layer.h) / 2;
+    }
     lithoLayers.push(layer);
     selectedLithoLayerId = layerId;
 
-    renderLithoFlatCanvas(true);
-    if (lithoStatus) {
-      lithoStatus.style.display = 'flex';
-      lithoStatus.className = 'custom-shape-status success';
-      lithoStatus.textContent = `✓ 已添加图案 (${origW}×${origH})，可直接在平面上拖动/拉伸长宽`;
-    }
-    downloadBtn.disabled = false;
+    renderLithoFlatCanvas();
+    lithoStatus.style.display = 'flex';
+    lithoStatus.className = 'custom-shape-status success';
+    lithoStatus.textContent = last ? '已添加图层。拖动图层或边框调整位置及大小。' : '已铺满 360° 浮雕区域。';
     scheduleUpdate();
-  };
-  img.src = dataUrl;
+  } finally {
+    image.close();
+  }
 }
 
 function getLithoCompositeBlob() {
@@ -487,7 +483,7 @@ function hitTestLithoCanvas(px, py) {
     const lw = selLayer.w * W;
     const lh = selLayer.h * H;
 
-    for (let offset of [0, (lx + lw > W ? -W : 0), (lx < 0 ? W : 0)]) {
+    for (const offset of lx + lw > W ? [0, -W] : [0]) {
       const bx = lx + offset;
       const by = ly;
       const handles = {
@@ -505,9 +501,6 @@ function hitTestLithoCanvas(px, py) {
           return { type: 'resize', handle: hName, layer: selLayer };
         }
       }
-      if (px >= bx && px <= bx + lw && py >= by && py <= by + lh) {
-        return { type: 'move', handle: null, layer: selLayer };
-      }
     }
   }
 
@@ -517,10 +510,10 @@ function hitTestLithoCanvas(px, py) {
     const ly = l.y * H;
     const lw = l.w * W;
     const lh = l.h * H;
-    for (let offset of [0, (lx + lw > W ? -W : 0), (lx < 0 ? W : 0)]) {
+    for (const offset of lx + lw > W ? [0, -W] : [0]) {
       const bx = lx + offset;
       if (px >= bx && px <= bx + lw && py >= ly && py <= ly + lh) {
-        return { type: 'select', handle: null, layer: l };
+        return { type: l.id === selectedLithoLayerId ? 'move' : 'select', handle: null, layer: l };
       }
     }
   }
@@ -530,6 +523,7 @@ function hitTestLithoCanvas(px, py) {
 
 if (lithoFlatCanvas) {
   lithoFlatCanvas.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary || e.button !== 0) return;
     const pos = getCanvasPointerPos(e);
     const hit = hitTestLithoCanvas(pos.x, pos.y);
 
@@ -588,52 +582,27 @@ if (lithoFlatCanvas) {
     const dx = (pos.x - pointerAction.startMouse.x) / W;
     const dy = (pos.y - pointerAction.startMouse.y) / H;
 
+    const start = pointerAction.startLayer;
     if (pointerAction.mode === 'move') {
-      layer.x = (pointerAction.startLayer.x + dx) % 1.0;
-      if (layer.x < 0) layer.x += 1.0;
-      layer.y = Math.max(0, Math.min(1.0 - layer.h, pointerAction.startLayer.y + dy));
-      renderLithoFlatCanvas(false);
-      scheduleUpdate();
-    } else if (pointerAction.mode === 'resize') {
-      const hnd = pointerAction.handle;
-      const s = pointerAction.startLayer;
-
-      if (hnd === 'r') {
-        layer.w = Math.max(0.04, Math.min(1.5, s.w + dx));
-      } else if (hnd === 'l') {
-        const nw = Math.max(0.04, Math.min(1.5, s.w - dx));
-        layer.x = (s.x + (s.w - nw)) % 1.0;
-        layer.w = nw;
-      } else if (hnd === 'b') {
-        layer.h = Math.max(0.08, Math.min(1.0 - layer.y, s.h + dy));
-      } else if (hnd === 't') {
-        const nh = Math.max(0.08, s.h - dy);
-        layer.y = Math.max(0, s.y + (s.h - nh));
-        layer.h = nh;
-      } else if (hnd === 'br') {
-        layer.w = Math.max(0.04, Math.min(1.5, s.w + dx));
-        layer.h = Math.max(0.08, Math.min(1.0 - layer.y, s.h + dy));
-      } else if (hnd === 'tr') {
-        layer.w = Math.max(0.04, Math.min(1.5, s.w + dx));
-        const nh = Math.max(0.08, s.h - dy);
-        layer.y = Math.max(0, s.y + (s.h - nh));
-        layer.h = nh;
-      } else if (hnd === 'bl') {
-        const nw = Math.max(0.04, Math.min(1.5, s.w - dx));
-        layer.x = (s.x + (s.w - nw)) % 1.0;
-        layer.w = nw;
-        layer.h = Math.max(0.08, Math.min(1.0 - layer.y, s.h + dy));
-      } else if (hnd === 'tl') {
-        const nw = Math.max(0.04, Math.min(1.5, s.w - dx));
-        layer.x = (s.x + (s.w - nw)) % 1.0;
-        layer.w = nw;
-        const nh = Math.max(0.08, s.h - dy);
-        layer.y = Math.max(0, s.y + (s.h - nh));
-        layer.h = nh;
+      layer.x = ((start.x + dx) % 1 + 1) % 1;
+      layer.y = Math.max(0, Math.min(1 - layer.h, start.y + dy));
+    } else {
+      const handle = pointerAction.handle;
+      if (handle.includes('l')) {
+        layer.w = Math.max(0.04, Math.min(1, start.w - dx));
+        layer.x = ((start.x + start.w - layer.w) % 1 + 1) % 1;
+      } else if (handle.includes('r')) {
+        layer.w = Math.max(0.04, Math.min(1, start.w + dx));
       }
-      renderLithoFlatCanvas(false);
-      scheduleUpdate();
+      if (handle.includes('t')) {
+        const bottom = start.y + start.h;
+        layer.y = Math.max(0, Math.min(bottom - 0.08, start.y + dy));
+        layer.h = bottom - layer.y;
+      } else if (handle.includes('b')) {
+        layer.h = Math.max(0.08, Math.min(1 - start.y, start.h + dy));
+      }
     }
+    renderLithoFlatCanvas(false);
   });
 
   const endDrag = (e) => {
@@ -657,223 +626,275 @@ if (lithoFlatCanvas) {
   lithoFlatCanvas.addEventListener('drop', (e) => {
     e.preventDefault();
     lithoFlatCanvas.style.outline = '';
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-      for (const file of e.dataTransfer.files) {
-        processFile(file, (f, dataUrl) => {
-          lithoFile = f;
-          addLithoLayerFromDataUrl(f.name, dataUrl);
-        });
-      }
-    }
+    if (e.dataTransfer?.files.length) addLithoFiles(e.dataTransfer.files);
   });
 }
 
 // Action buttons
-if (btnAddMoreLitho && lithoAddMoreInput) {
-  btnAddMoreLitho.addEventListener('click', () => lithoAddMoreInput.click());
-  lithoAddMoreInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length) {
-      for (const file of e.target.files) {
-        processFile(file, (f, dataUrl) => {
-          lithoFile = f;
-          addLithoLayerFromDataUrl(f.name, dataUrl);
-        });
-      }
-      lithoAddMoreInput.value = '';
-    }
-  });
+function removeSelectedLithoLayer() {
+  if (selectedLithoLayerId === null) return;
+  lithoLayers = lithoLayers.filter(layer => layer.id !== selectedLithoLayerId);
+  selectedLithoLayerId = lithoLayers.at(-1)?.id ?? null;
+  if (!lithoLayers.length) {
+    lithoInput.value = '';
+    lithoStatus.style.display = 'none';
+  }
+  renderLithoFlatCanvas();
+  scheduleUpdate();
 }
 
-if (btnDeleteLithoLayer) {
-  btnDeleteLithoLayer.addEventListener('click', () => {
-    if (selectedLithoLayerId !== null) {
-      lithoLayers = lithoLayers.filter(l => l.id !== selectedLithoLayerId);
-      selectedLithoLayerId = lithoLayers.length ? lithoLayers[lithoLayers.length - 1].id : null;
-      renderLithoFlatCanvas(true);
-      scheduleUpdate();
-    }
-  });
+function clearLithoLayers() {
+  layerGeneration++;
+  layerUploadQueue = Promise.resolve();
+  lithoLayers = [];
+  selectedLithoLayerId = null;
+  pointerAction.mode = 'none';
+  lithoAddMoreInput.value = lithoInput.value = '';
+  lithoStatus.style.display = 'none';
+  renderLithoFlatCanvas();
 }
 
-if (btnCenterLithoLayer) {
-  btnCenterLithoLayer.addEventListener('click', () => {
-    const sel = lithoLayers.find(l => l.id === selectedLithoLayerId);
-    if (sel) {
-      sel.x = Math.max(0, 0.5 - sel.w / 2);
-      renderLithoFlatCanvas(true);
-      scheduleUpdate();
-    }
-  });
-}
-
-if (btnFitHeightLithoLayer) {
-  btnFitHeightLithoLayer.addEventListener('click', () => {
-    const sel = lithoLayers.find(l => l.id === selectedLithoLayerId);
-    if (sel) {
-      sel.y = 0;
-      sel.h = 1.0;
-      renderLithoFlatCanvas(true);
-      scheduleUpdate();
-    }
-  });
-}
-
-if (btnClearAllLitho) {
-  btnClearAllLitho.addEventListener('click', () => {
-    lithoLayers = [];
-    selectedLithoLayerId = null;
-    lithoData = null;
-    renderLithoFlatCanvas(true);
-    scheduleUpdate();
-  });
-}
-
-window.addEventListener('keydown', (e) => {
-  if (selectedLithoLayerId !== null && (e.key === 'Delete' || e.key === 'Backspace')) {
-    if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
-    e.preventDefault();
-    lithoLayers = lithoLayers.filter(l => l.id !== selectedLithoLayerId);
-    selectedLithoLayerId = lithoLayers.length ? lithoLayers[lithoLayers.length - 1].id : null;
-    renderLithoFlatCanvas(true);
-    scheduleUpdate();
+btnAddMoreLitho.addEventListener('click', () => lithoAddMoreInput.click());
+lithoAddMoreInput.addEventListener('change', () => {
+  if (lithoAddMoreInput.files.length) {
+    addLithoFiles(lithoAddMoreInput.files);
+    lithoAddMoreInput.value = '';
   }
 });
 
-// Hook initial upload zone to flat canvas studio
-if (lithoZone && lithoInput) {
-  setupUpload(lithoZone, lithoInput, (file, dataUrl) => {
-    lithoFile = file;
-    showThumb(lithoZone, dataUrl);
-    addLithoLayerFromDataUrl(file.name, dataUrl);
-  });
+btnDeleteLithoLayer.addEventListener('click', removeSelectedLithoLayer);
+
+btnCenterLithoLayer.addEventListener('click', () => {
+  const layer = lithoLayers.find(item => item.id === selectedLithoLayerId);
+  if (!layer) return;
+  layer.x = (1 - layer.w) / 2;
+  renderLithoFlatCanvas();
+  scheduleUpdate();
+});
+
+btnFitHeightLithoLayer.addEventListener('click', () => {
+  const layer = lithoLayers.find(item => item.id === selectedLithoLayerId);
+  if (!layer) return;
+  Object.assign(layer, { x: 0, y: 0, w: 1, h: 1 });
+  renderLithoFlatCanvas();
+  scheduleUpdate();
+});
+
+btnClearAllLitho.addEventListener('click', () => {
+  clearLithoLayers();
+  scheduleUpdate();
+});
+
+window.addEventListener('keydown', event => {
+  if (selectedLithoLayerId === null || !(event.key === 'Delete' || event.key === 'Backspace')) return;
+  if (document.activeElement?.matches('input, textarea, select, [contenteditable="true"]')) return;
+  if (!shapeLantern.checked) return;
+  event.preventDefault();
+  removeSelectedLithoLayer();
+});
+
+setupUpload(lithoZone, lithoInput, file => {
+  addLithoFiles([file]);
+  lithoInput.value = '';
+}, { raw: true });
+
+for (const control of [S.upperShellHeight.el, S.diameter.el, S.height.el, S.bulbHeight.el]) {
+  control.addEventListener('input', () => renderLithoFlatCanvas());
+}
+for (const control of document.querySelectorAll('input[name="projMode"]')) {
+  control.addEventListener('change', () => renderLithoFlatCanvas());
 }
 
-if (lithoHeight) {
-  lithoHeight.addEventListener('input', () => {
-    if (lithoHeightVal) lithoHeightVal.textContent = lithoHeight.value + ' mm';
-    if (S.upperShellHeight.el) S.upperShellHeight.el.value = lithoHeight.value;
-    if (S.upperShellHeight.vEl) S.upperShellHeight.vEl.textContent = lithoHeight.value + ' mm';
-    renderLithoFlatCanvas(true);
+for (const control of [lithoMinThick, lithoMaxThick]) {
+  control.addEventListener('input', () => {
+    if (Number(lithoMinThick.value) > Number(lithoMaxThick.value)) {
+      const other = control === lithoMinThick ? lithoMaxThick : lithoMinThick;
+      other.value = control.value;
+    }
+    lithoMinThickVal.textContent = lithoMinThick.value + ' mm';
+    lithoMaxThickVal.textContent = lithoMaxThick.value + ' mm';
     scheduleUpdate();
   });
 }
-if (S.upperShellHeight.el) {
-  S.upperShellHeight.el.addEventListener('input', () => {
-    if (lithoHeight) lithoHeight.value = S.upperShellHeight.el.value;
-    if (lithoHeightVal) lithoHeightVal.textContent = S.upperShellHeight.el.value + ' mm';
-    renderLithoFlatCanvas(true);
-  });
-}
-if (S.diameter.el) {
-  S.diameter.el.addEventListener('input', () => {
-    renderLithoFlatCanvas(true);
-  });
-}
+lithoRepeat.addEventListener('change', scheduleUpdate);
+lithoInvert.addEventListener('change', scheduleUpdate);
+lithoEnable.addEventListener('change', scheduleUpdate);
+renderLithoFlatCanvas();
 
-if (lithoMinThick) lithoMinThick.addEventListener('input', () => { lithoMinThickVal.textContent = lithoMinThick.value + ' mm'; scheduleUpdate(); });
-if (lithoMaxThick) lithoMaxThick.addEventListener('input', () => { lithoMaxThickVal.textContent = lithoMaxThick.value + ' mm'; scheduleUpdate(); });
-if (lithoRepeat)   lithoRepeat.addEventListener('change', scheduleUpdate);
-if (lithoInvert)   lithoInvert.addEventListener('change', scheduleUpdate);
-if (lithoEnable)   lithoEnable.addEventListener('change', scheduleUpdate);
-
-function logDebug(msg, color='#8ba4d0') {
-  console.log('[App]', msg);
-  let el = document.getElementById('debugConsole');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'debugConsole';
-    el.style.cssText = 'position:fixed;bottom:10px;right:10px;max-width:320px;max-height:160px;overflow-y:auto;background:rgba(10,14,26,0.9);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:8px 12px;font-size:11px;font-family:monospace;z-index:99999;color:#fff;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
-    document.body.appendChild(el);
-  }
-  el.innerHTML += `<div style="color:${color};margin-top:2px;">• ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
+function logDebug(message) {
+  console.debug('[Shadow Lamp]', message);
 }
-
-window.addEventListener('error', e => {
-  logDebug(`[Error] ${e.message} at ${e.filename || 'app.js'}:${e.lineno || 0}`, '#ff6b6b');
-});
 
 // Silhouette Controls
 const silThreshold    = document.getElementById('silThreshold');
 const silThresholdVal = document.getElementById('silThresholdVal');
 const invertSilhouette = document.getElementById('invertSilhouette');
-let uploadedDataUrl   = null;
+let silhouetteSource = null;
+let loadingPattern = false;
+let silhouetteUploadRevision = 0;
+let silhouetteMaskRevision = 0;
+let silhouetteTimer = null;
+let silhouetteThumbUrl = null;
 
-if (silThreshold) {
-  silThreshold.addEventListener('input', () => {
-    if (silThresholdVal) silThresholdVal.textContent = silThreshold.value;
-    if (uploadedDataUrl) reprocessSilhouette();
-  });
+silThreshold.addEventListener('input', () => {
+  silThresholdVal.textContent = silThreshold.value;
+  reprocessSilhouette();
+});
+invertSilhouette.addEventListener('change', reprocessSilhouette);
+
+function resetSilhouetteUpload() {
+  loadingPattern = false;
+  silhouetteUploadRevision++;
+  silhouetteMaskRevision++;
+  clearTimeout(silhouetteTimer);
+  silhouetteSource = null;
+  silhouetteMaskBlob = null;
+  uploadedFile = null;
+  imageData = null;
+  patternShapeRadii = patternProfileData = null;
+  if (silhouetteThumbUrl) URL.revokeObjectURL(silhouetteThumbUrl);
+  silhouetteThumbUrl = null;
+  downloadBtn.disabled = true;
 }
-if (invertSilhouette) {
-  invertSilhouette.addEventListener('change', () => {
-    if (uploadedDataUrl) reprocessSilhouette();
-  });
+
+function beginSilhouetteUpload(label) {
+  resetSilhouetteUpload();
+  loadingPattern = true;
+  uploadZone.querySelector('img')?.remove();
+  uploadZone.classList.remove('has-image');
+  for (const label of uploadZone.querySelectorAll('.icon, .label, .sublabel')) label.style.display = '';
+  matchPatternStatus.style.display = 'none';
+  scheduleUpdate();
+  if (!activeExport) setStatus('busy', '正在读取图案…');
+  return silhouetteUploadRevision;
+}
+
+async function loadSilhouetteUpload(file, revision, label = '剪影') {
+  try {
+    const bitmap = await createImageBitmap(file);
+    try {
+      if (revision !== silhouetteUploadRevision) return;
+      const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      context.drawImage(bitmap, 0, 0, width, height);
+      const rgba = context.getImageData(0, 0, width, height).data;
+      silhouetteSource = { file, width, height, rgba, label };
+    } finally {
+      bitmap.close();
+    }
+    await renderSilhouetteMask(++silhouetteMaskRevision);
+  } catch (error) {
+    if (revision === silhouetteUploadRevision && !activeExport) {
+      setStatus('error', '读取图片失败：' + error.message);
+    }
+  } finally {
+    if (revision === silhouetteUploadRevision) {
+      loadingPattern = false;
+      syncExportButton();
+    }
+  }
 }
 
 function reprocessSilhouette() {
-  if (!uploadedDataUrl) return;
-  loadSmartSilhouette(uploadedDataUrl, (w, h, gray, binarizedDataUrl) => {
-    imageData = { width: w, height: h, data: gray };
-    if (binarizedDataUrl) {
-      showThumb(uploadZone, binarizedDataUrl);
+  if (!silhouetteSource) return;
+  const revision = ++silhouetteMaskRevision;
+  silhouetteMaskBlob = null;
+  downloadBtn.disabled = true;
+  clearTimeout(silhouetteTimer);
+  silhouetteTimer = setTimeout(() => renderSilhouetteMask(revision), 45);
+}
+
+async function renderSilhouetteMask(revision) {
+  if (revision !== silhouetteMaskRevision || !silhouetteSource) return;
+  const { file, width, height, rgba, label } = silhouetteSource;
+  try {
+    const gray = globalThis.ShadowLampSilhouette.mask(rgba, width, height, silThreshold.value, invertSilhouette.checked);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    const bitmap = context.createImageData(width, height);
+    for (let i = 0; i < gray.length; i++) {
+      const offset = i * 4;
+      bitmap.data[offset] = bitmap.data[offset + 1] = bitmap.data[offset + 2] = gray[i];
+      bitmap.data[offset + 3] = 255;
     }
+    context.putImageData(bitmap, 0, 0);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (revision !== silhouetteMaskRevision) return;
+    if (!blob) throw new Error('Could not encode the processed mask.');
+
+    uploadedFile = file;
+    silhouetteMaskBlob = blob;
+    imageData = { width, height, data: gray };
+    if (silhouetteThumbUrl) URL.revokeObjectURL(silhouetteThumbUrl);
+    silhouetteThumbUrl = URL.createObjectURL(blob);
+    showThumb(uploadZone, silhouetteThumbUrl);
+    patternShapeRadii = patternProfileData = null;
     extractPatternRadialProfile();
+    if (!activeExport) setStatus('ready', label + '已就绪 · ' + width + ' × ' + height);
+    downloadBtn.disabled = activeExport !== null;
     scheduleUpdate();
-  });
+  } catch (error) {
+    if (revision === silhouetteMaskRevision && !activeExport) {
+      setStatus('error', '剪影处理失败：' + error.message);
+    }
+  }
 }
 
 // ============================================================
 // Image Upload
 // ============================================================
-setupUpload(uploadZone, fileInput, (file, dataUrl) => {
-  uploadedFile = file;
-  uploadedDataUrl = dataUrl;
-  logDebug(`File loaded: ${file.name} (${(file.size/1024).toFixed(1)} KB)`, '#74c0fc');
-  loadSmartSilhouette(dataUrl, (w, h, gray, binarizedDataUrl) => {
-    imageData = { width: w, height: h, data: gray };
-    downloadBtn.disabled = false;
-    showThumb(uploadZone, binarizedDataUrl || dataUrl);
-    setStatus('ready', `Silhouette loaded: ${w}×${h}`);
-    logDebug(`Contour silhouette generated: ${w}×${h}`, '#51cf66');
-    extractPatternRadialProfile();
-    scheduleUpdate();
-  });
-});
+setupUpload(uploadZone, fileInput, file => {
+  loadSilhouetteUpload(file, beginSilhouetteUpload('silhouette'));
+}, { raw: true });
 
-setupUpload(profileZone, profileInput, (file, dataUrl) => {
-  profileFile = file;
-  showThumb(profileZone, dataUrl);
+setupUpload(profileZone, profileInput, (file, dataUrl, isCurrent) => {
   loadGrayscale(dataUrl, (w, h, gray) => {
+    if (!isCurrent()) return;
+    profileFile = file;
     profileData = extractProfile(w, h, gray);
-    setStatus('ready', 'Custom profile loaded');
+    showThumb(profileZone, dataUrl);
+    setStatus('ready', '已载入侧面轮廓');
     scheduleUpdate();
   });
-});
+}, { latest: true });
 
-function setupUpload(zone, input, cb) {
+function setupUpload(zone, input, cb, { raw = false, latest = false } = {}) {
   if (!zone || !input) return;
-  zone.style.cursor = 'pointer';
-  zone.addEventListener('click', (e) => {
-    if (e.target !== input) {
-      input.click();
+  let selection = 0;
+  const select = file => {
+    const current = ++selection;
+    const epoch = uploadEpoch;
+    const isCurrent = () => epoch === uploadEpoch && (!latest || current === selection);
+    if (raw) {
+      cb(file);
+    } else {
+      processFile(file, (selectedFile, dataUrl) => {
+        if (isCurrent()) cb(selectedFile, dataUrl, isCurrent);
+      });
     }
+  };
+  zone.style.cursor = 'pointer';
+  zone.addEventListener('click', e => {
+    if (e.target !== input) input.click();
   });
   zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('drag-over');
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-      logDebug(`Dropped: ${e.dataTransfer.files[0].name}`, '#fcc419');
-      processFile(e.dataTransfer.files[0], cb);
-    }
+    const file = e.dataTransfer?.files[0];
+    if (file) select(file);
   });
-  input.addEventListener('change', (e) => {
-    if (e.target && e.target.files && e.target.files.length) {
-      logDebug(`Selected: ${e.target.files[0].name}`, '#fcc419');
-      processFile(e.target.files[0], cb);
-    }
+  input.addEventListener('change', () => {
+    const file = input.files[0];
+    if (file) select(file);
   });
 }
 
@@ -913,118 +934,6 @@ function showThumb(zone, src) {
   img.src = src;
   img.style.display = 'block';
   zone.classList.add('has-image');
-}
-
-function loadSmartSilhouette(dataUrl, cb) {
-  const img = new Image();
-  img.onload = () => {
-    try {
-      const s = Math.min(1, 1024 / Math.max(img.width, img.height));
-      const w = Math.round(img.width * s), h = Math.round(img.height * s);
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0, w, h);
-      const imgData = ctx.getImageData(0, 0, w, h);
-      const px = imgData.data;
-      const gray = new Uint8Array(w * h);
-
-      const thresh = silThreshold ? parseInt(silThreshold.value) : 128;
-      const isInvert = invertSilhouette ? invertSilhouette.checked : false;
-
-      // 1. Check transparency (Alpha channel)
-      let alphaTransCount = 0;
-      let alphaOpaqueCount = 0;
-      for (let i = 0; i < px.length; i += 4) {
-        if (px[i + 3] < 200) alphaTransCount++;
-        if (px[i + 3] > 20) alphaOpaqueCount++;
-      }
-      const hasAlpha = alphaTransCount > 20 && alphaOpaqueCount > 20;
-
-      if (hasAlpha) {
-        // Transparent PNG (去背图): 直接提取整个图案的外部轮廓为纯黑剪影，不辨别内部黑白色
-        for (let i = 0; i < w * h; i++) {
-          const a = px[i * 4 + 3];
-          let isSolid = a > 30;
-          if (isInvert) isSolid = !isSolid;
-          gray[i] = isSolid ? 0 : 255;
-        }
-      } else {
-        // 2. Colored RGB image: sample 4 borders to determine background color
-        let rSum = 0, gSum = 0, bSum = 0, borderCount = 0;
-        for (let x = 0; x < w; x++) {
-          const idxTop = (0 * w + x) * 4;
-          const idxBot = ((h - 1) * w + x) * 4;
-          rSum += px[idxTop] + px[idxBot];
-          gSum += px[idxTop + 1] + px[idxBot + 1];
-          bSum += px[idxTop + 2] + px[idxBot + 2];
-          borderCount += 2;
-        }
-        for (let y = 1; y < h - 1; y++) {
-          const idxL = (y * w + 0) * 4;
-          const idxR = (y * w + (w - 1)) * 4;
-          rSum += px[idxL] + px[idxR];
-          gSum += px[idxL + 1] + px[idxR + 1];
-          bSum += px[idxL + 2] + px[idxR + 2];
-          borderCount += 2;
-        }
-        const bgR = rSum / borderCount;
-        const bgG = gSum / borderCount;
-        const bgB = bSum / borderCount;
-
-        // Compute color distances from detected border background
-        let maxDist = 0;
-        const dists = new Float32Array(w * h);
-        for (let i = 0; i < w * h; i++) {
-          const dr = px[i * 4] - bgR;
-          const dg = px[i * 4 + 1] - bgG;
-          const db = px[i * 4 + 2] - bgB;
-          const d = Math.sqrt(dr * dr + dg * dg + db * db);
-          dists[i] = d;
-          if (d > maxDist) maxDist = d;
-        }
-
-        if (maxDist > 30.0) {
-          // Color contrast detected: distance thresholding
-          const cutoff = Math.max(20.0, Math.min(140.0, maxDist * (thresh / 255.0)));
-          for (let i = 0; i < w * h; i++) {
-            let isSolid = dists[i] >= cutoff;
-            if (isInvert) isSolid = !isSolid;
-            gray[i] = isSolid ? 0 : 255;
-          }
-        } else {
-          // Standard grayscale luminance thresholding
-          for (let i = 0; i < w * h; i++) {
-            const lum = Math.round(0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]);
-            let isSolid = lum < thresh;
-            if (isInvert) isSolid = !isSolid;
-            gray[i] = isSolid ? 0 : 255;
-          }
-        }
-      }
-
-      // Generate black-on-white silhouette preview thumbnail
-      const outImgData = ctx.createImageData(w, h);
-      for (let i = 0; i < w * h; i++) {
-        const val = gray[i];
-        outImgData.data[i * 4 + 0] = val;
-        outImgData.data[i * 4 + 1] = val;
-        outImgData.data[i * 4 + 2] = val;
-        outImgData.data[i * 4 + 3] = 255;
-      }
-      ctx.putImageData(outImgData, 0, 0);
-      const binarizedDataUrl = c.toDataURL('image/png');
-
-      cb(w, h, gray, binarizedDataUrl);
-    } catch (e) {
-      logDebug(`Silhouette error: ${e.message}`, '#ff6b6b');
-      console.error("Silhouette error:", e);
-    }
-  };
-  img.onerror = () => {
-    logDebug('Image decode failed', '#ff6b6b');
-  };
-  img.src = dataUrl;
 }
 
 function loadGrayscale(dataUrl, cb) {
@@ -1305,25 +1214,31 @@ function showCustomShapeStatus(type, message) {
 // ============================================================
 // Custom Shape Upload
 // ============================================================
-setupUpload(customShapeZone, customShapeInput, (file, dataUrl) => {
+let customShapeUploadCurrent = null;
+let customShapeMaskRevision = 0;
+setupUpload(customShapeZone, customShapeInput, (file, dataUrl, isCurrent) => {
   customShapeImageData = dataUrl;
+  customShapeUploadCurrent = isCurrent;
   showThumb(customShapeZone, dataUrl);
   reprocessCustomShape();
-});
+}, { latest: true });
 
 async function reprocessCustomShape() {
-  if (!customShapeImageData) return;
+  if (!customShapeImageData || !customShapeUploadCurrent?.()) return;
+  const revision = ++customShapeMaskRevision;
+  const isCurrent = customShapeUploadCurrent;
   const threshold = parseInt(customThresholdEl.value);
   const smooth = parseInt(customSmoothEl.value);
   const result = await extractCustomShapeContour(customShapeImageData, threshold, smooth);
+  if (revision !== customShapeMaskRevision || !isCurrent()) return;
   if (result) {
     customShapeRadii = result.radii;
-    showCustomShapeStatus('success', `✓ Shape extracted — ${result.pointCount} contour points`);
-    setStatus('ready', 'Custom shape loaded');
+    showCustomShapeStatus('success', `已提取截面 · ${result.pointCount} 个轮廓点`);
+    setStatus('ready', '已载入截面轮廓');
     scheduleUpdate();
   } else {
     customShapeRadii = null;
-    showCustomShapeStatus('error', '✗ No valid contour found — try adjusting threshold');
+    showCustomShapeStatus('error', '未找到轮廓，请调整阈值。');
     scheduleUpdate();
   }
 }
@@ -1348,26 +1263,10 @@ function extractPatternRadialProfile() {
   const { width: w, height: h, data: gray } = imageData;
   const threshold = 128;
 
-  // 1. Determine image polarity from border pixels
-  //    If borders are mostly dark → figure is light → invert
-  let borderDark = 0, borderTotal = 0;
-  for (let x = 0; x < w; x++) {
-    if (gray[0 * w + x] < threshold) borderDark++;          // top row
-    if (gray[(h - 1) * w + x] < threshold) borderDark++;    // bottom row
-    borderTotal += 2;
-  }
-  for (let y = 1; y < h - 1; y++) {
-    if (gray[y * w + 0] < threshold) borderDark++;           // left col
-    if (gray[y * w + (w - 1)] < threshold) borderDark++;     // right col
-    borderTotal += 2;
-  }
-  const invert = (borderDark / borderTotal) > 0.5;
-
-  // 2. Build binary and find centroid of figure pixels
   let cx = 0, cy = 0, figCount = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const isFigure = invert ? (gray[y * w + x] >= threshold) : (gray[y * w + x] < threshold);
+      const isFigure = gray[y * w + x] < threshold;
       if (isFigure) {
         cx += x;
         cy += y;
@@ -1376,11 +1275,11 @@ function extractPatternRadialProfile() {
     }
   }
   if (figCount < 10) {
-    patternShapeRadii = null;
+    patternShapeRadii = patternProfileData = null;
     if (matchPatternStatus) {
       matchPatternStatus.style.display = 'flex';
       matchPatternStatus.className = 'custom-shape-status error';
-      matchPatternStatus.textContent = '✗ No pattern shape detected';
+      matchPatternStatus.textContent = '未找到可用的图案轮廓。';
     }
     return;
   }
@@ -1402,7 +1301,7 @@ function extractPatternRadialProfile() {
       const px = Math.round(cx + r * dx);
       const py = Math.round(cy + r * dy);
       if (px < 0 || py < 0 || px >= w || py >= h) break;
-      const isFigure = invert ? (gray[py * w + px] >= threshold) : (gray[py * w + px] < threshold);
+      const isFigure = gray[py * w + px] < threshold;
       if (isFigure) lastFigR = r;
     }
     radii[i] = lastFigR;
@@ -1438,7 +1337,7 @@ function extractPatternRadialProfile() {
   for (let row = 0; row < h; row++) {
     let maxExtent = 0;
     for (let x = 0; x < w; x++) {
-      const isFig = invert ? (gray[row * w + x] >= threshold) : (gray[row * w + x] < threshold);
+      const isFig = gray[row * w + x] < threshold;
       if (isFig) maxExtent = Math.max(maxExtent, Math.abs(x - imgCx));
     }
     profileRadii[row] = maxExtent;
@@ -1454,7 +1353,7 @@ function extractPatternRadialProfile() {
   if (matchPatternStatus) {
     matchPatternStatus.style.display = 'flex';
     matchPatternStatus.className = 'custom-shape-status success';
-    matchPatternStatus.textContent = `✓ Pattern shape extracted (${invert ? 'light-on-dark' : 'dark-on-light'})`;
+    matchPatternStatus.textContent = '已从投影图案提取截面';
   }
   // Always re-render to pick up the new radii
   scheduleUpdate();
@@ -1465,375 +1364,373 @@ function extractPatternRadialProfile() {
 // ============================================================
 // Client-side preview (cylinder/custom shell)
 // ============================================================
+function samplePreviewImage(data, width, height, u, v, wrap) {
+  const x = wrap ? u : Math.max(0, Math.min(width - 1, u));
+  const y = Math.max(0, Math.min(height - 1, v));
+  const left = Math.floor(x);
+  const top = Math.floor(y);
+  const next = Math.min(top + 1, height - 1);
+  const a = wrap ? (left + width) % width : left;
+  const b = wrap ? (a + 1) % width : Math.min(a + 1, width - 1);
+  const dx = x - left;
+  const dy = y - top;
+  const upper = data[top * width + a] * (1 - dx) + data[top * width + b] * dx;
+  const lower = data[next * width + a] * (1 - dx) + data[next * width + b] * dx;
+  return upper * (1 - dy) + lower * dy;
+}
+
+function contourPreviewGeometry(field, rows, columns, gridPositions, gridColors, caps) {
+  const nodeCount = field.length;
+  const cells = new Uint8Array(rows * columns);
+  const facesForCase = [0, 1, 1, 2, 1, 4, 2, 3, 1, 2, 4, 3, 2, 3, 3, 2];
+  let indexCount = caps.length;
+  let solidN = 0;
+  for (let row = 0; row < rows; row++) {
+    const offset = row * columns;
+    for (let col = 0; col < columns; col++) {
+      const topLeft = offset + col;
+      const topRight = offset + (col + 1) % columns;
+      const a = field[topLeft], b = field[topRight];
+      const c = field[topRight + columns], d = field[topLeft + columns];
+      const solid = (a > 0 ? 1 : 0) | (b > 0 ? 2 : 0) | (c > 0 ? 4 : 0) | (d > 0 ? 8 : 0);
+      if (!solid) continue;
+
+      // Resolve checkerboard cells from the signed saddle, rather than joining two tips.
+      const saddle = a * c - b * d;
+      const separate = (solid === 5 && saddle <= 0) || (solid === 10 && saddle >= 0);
+      cells[topLeft] = solid | (separate ? 16 : 0);
+      indexCount += 3 * (separate ? 2 : facesForCase[solid]);
+      solidN++;
+    }
+  }
+
+  const indices = new Uint32Array(indexCount);
+  indices.set(caps);
+  let cursor = caps.length;
+  const edgeVertices = new Int32Array(nodeCount * 2).fill(-1);
+  const vertexOffset = gridPositions.length / 3;
+  let extraPositions = new Float32Array(columns * 12);
+  let extraColors = new Float32Array(extraPositions.length);
+  let extraCount = 0;
+
+  function crossing(key, a, b) {
+    if (edgeVertices[key] >= 0) return edgeVertices[key];
+    if (extraCount === extraPositions.length) {
+      const positions = new Float32Array(extraCount * 2);
+      const colors = new Float32Array(positions.length);
+      positions.set(extraPositions);
+      colors.set(extraColors);
+      extraPositions = positions;
+      extraColors = colors;
+    }
+    const id = vertexOffset + extraCount / 3;
+    const t = field[a] / (field[a] - field[b]);
+    for (let axis = 0; axis < 3; axis++, extraCount++) {
+      const p = a * 3 + axis, q = b * 3 + axis;
+      extraPositions[extraCount] = gridPositions[p] + (gridPositions[q] - gridPositions[p]) * t;
+      extraColors[extraCount] = gridColors[p] + (gridColors[q] - gridColors[p]) * t;
+    }
+    edgeVertices[key] = id;
+    return id;
+  }
+
+  const corners = new Int32Array(4);
+  const polygon = new Int32Array(6);
+  for (let row = 0; row < rows; row++) {
+    const offset = row * columns;
+    for (let col = 0; col < columns; col++) {
+      const a = offset + col;
+      const code = cells[a];
+      if (!code) continue;
+      const b = offset + (col + 1) % columns;
+      const c = b + columns, d = a + columns;
+      if (code === 15) {
+        indices[cursor++] = a;
+        indices[cursor++] = c;
+        indices[cursor++] = b;
+        indices[cursor++] = a;
+        indices[cursor++] = d;
+        indices[cursor++] = c;
+        continue;
+      }
+
+      const solid = code & 15;
+      corners[0] = a;
+      corners[1] = b;
+      corners[2] = c;
+      corners[3] = d;
+      const edgeKeys = [a, nodeCount + b, d, nodeCount + a];
+      if (code & 16) {
+        for (let corner = solid === 5 ? 0 : 1; corner < 4; corner += 2) {
+          const previous = (corner + 3) % 4;
+          const next = (corner + 1) % 4;
+          indices[cursor++] = corners[corner];
+          indices[cursor++] = crossing(edgeKeys[previous], corners[previous], corners[corner]);
+          indices[cursor++] = crossing(edgeKeys[corner], corners[corner], corners[next]);
+        }
+        continue;
+      }
+
+      let count = 0;
+      for (let corner = 0; corner < 4; corner++) {
+        const next = (corner + 1) % 4;
+        const inside = !!(solid & (1 << corner));
+        if (inside) polygon[count++] = corners[corner];
+        if (inside !== !!(solid & (1 << next))) {
+          polygon[count++] = crossing(edgeKeys[corner], corners[corner], corners[next]);
+        }
+      }
+      for (let i = 2; i < count; i++) {
+        indices[cursor++] = polygon[0];
+        indices[cursor++] = polygon[i];
+        indices[cursor++] = polygon[i - 1];
+      }
+    }
+  }
+
+  const positions = new Float32Array(gridPositions.length + extraCount);
+  const colors = new Float32Array(positions.length);
+  positions.set(gridPositions);
+  positions.set(extraPositions.subarray(0, extraCount), gridPositions.length);
+  colors.set(gridColors);
+  colors.set(extraColors.subarray(0, extraCount), gridColors.length);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeVertexNormals();
+  return { geo: geometry, solidN, totalN: cells.length };
+}
+
+function reliefSuppliesProjection() {
+  return !imageData && !silhouetteSource && !loadingPattern &&
+    shapeLantern.checked && lithoEnable.checked && !!lithoData;
+}
+
+function syncExportButton() {
+  const reuseRelief = reliefSuppliesProjection();
+  downloadBtn.disabled = !!activeExport || !(silhouetteMaskBlob || reuseRelief);
+  document.getElementById('projectionFallback').hidden = !reuseRelief;
+}
+
 function buildPreview() {
-  if (!imageData && !lithoData) return null;
+  const image = imageData || (reliefSuppliesProjection() ? lithoData : null);
+  if (!image) return null;
 
-  const R      = parseFloat(S.diameter.el.value) / 2;
-  const H_lower = parseFloat(S.height.el.value);
-  const H_base = H_lower === 0 ? 0.1 : H_lower;
-  const shadow = parseFloat(S.shadowSize.el.value);
-  const hLight = parseFloat(S.bulbHeight.el.value);
-  const res    = parseInt(S.resolution.el.value);
-  const nZ     = res;
-  const nPhi   = res;
-  const isLantern = shapeLantern && shapeLantern.checked;
-  const keepUpperShell = document.getElementById('upperShell').value === 'solid';
-  const hasUpperHood = isLantern || keepUpperShell;
-  const upperShellHeight = parseFloat(S.upperShellHeight.el.value);
-  const supportCount = parseInt(document.getElementById('supportCount').value);
-  const supportWidth = parseFloat(S.supportWidth.el.value);
-
-  const projMode = document.querySelector('input[name="projMode"]:checked').value;
-  // Total height of lamp: lower body (H_base) + upper hood (upperShellHeight)
-  const H = H_base + (hasUpperHood ? upperShellHeight : 0);
-  const solidTopZ = H;
-  const hLimit = H;
-
+  const radius = Number(S.diameter.el.value) / 2;
+  const lowerHeight = Number(S.height.el.value) || 0.1;
+  const lightHeight = Number(S.bulbHeight.el.value);
+  const wallThickness = Number(S.thickness.el.value);
+  const rows = Number(S.resolution.el.value);
+  const lantern = shapeLantern && shapeLantern.checked;
+  const hasHood = hasUpperHood();
+  const upperHeight = hasHood ? Number(S.upperShellHeight.el.value) : 0;
+  const height = lowerHeight + upperHeight;
+  const rowHeight = height / rows;
+  const wall = document.querySelector('input[name="projMode"]:checked').value === 'wall';
+  const hoodStart = wall ? lowerHeight : Math.min(lightHeight, lowerHeight);
+  const hoodHeight = height - hoodStart;
+  const supportCount = Number(document.getElementById('supportCount').value);
+  const supportHalfWidth = Number(S.supportWidth.el.value) / 2;
+  const plateThickness = document.getElementById('bottomStyle').value === 'closed'
+    ? Number(S.bottomThickness.el.value) : 0;
+  const turn = 2 * Math.PI;
   const baseShape = document.getElementById('baseShape').value;
-  const isCustomShape = baseShape === 'custom' && customShapeRadii;
-  const isMatchPattern = baseShape === 'match_pattern' && patternShapeRadii;
-  let nSides = 0;
-  if (!isCustomShape && !isMatchPattern) {
-    if (baseShape === 'triangle') nSides = 3;
-    else if (baseShape === 'square') nSides = 4;
-    else if (baseShape === 'pentagon') nSides = 5;
-    else if (baseShape === 'hexagon') nSides = 6;
-  }
+  const shapeRadii = baseShape === 'custom' ? customShapeRadii
+    : baseShape === 'match_pattern' ? patternShapeRadii : null;
+  const sides = { triangle: 3, square: 4, pentagon: 5, hexagon: 6 }[baseShape] || 0;
+  // Keep explicitly selected polygon corners on lattice columns.
+  const columns = sides ? Math.ceil(rows / (2 * sides)) * 2 * sides : rows;
+  const angleStep = turn / columns;
+  const sideAngle = sides ? turn / sides : turn;
+  const supportAngle = supportCount ? turn / supportCount : turn;
 
-  // Determine active shape radii (custom upload or auto-extracted from pattern)
-  const activeShapeRadii = isCustomShape ? customShapeRadii : (isMatchPattern ? patternShapeRadii : null);
-
-  const imgRef = imageData || lithoData;
-  if (!imgRef) return null;
-  const { width: W, height: IH, data: gray } = imgRef;
-  const shadowW = shadow, shadowH = shadow * IH / W;
-
-  // Profile radii at each z node (nZ+1)
-  const rProfile = new Float32Array(nZ + 1);
-  const activeProfile = (shapeCustom.checked && profileData) ? profileData
-                      : (shapeMatchPattern.checked && patternProfileData) ? patternProfileData
-                      : null;
-  if (activeProfile) {
-    for (let i = 0; i <= nZ; i++) {
-      const t = i / nZ * (activeProfile.length - 1);
-      const lo = Math.floor(t), hi = Math.min(lo + 1, activeProfile.length - 1);
-      rProfile[i] = R * Math.max(0.02, activeProfile[lo] + (activeProfile[hi] - activeProfile[lo]) * (t - lo));
+  const cosines = new Float64Array(columns);
+  const sines = new Float64Array(columns);
+  const scales = new Float64Array(columns);
+  const supportAngles = new Float64Array(columns);
+  let minimumScale = Infinity;
+  for (let col = 0; col < columns; col++) {
+    const phi = col * angleStep;
+    cosines[col] = Math.cos(phi);
+    sines[col] = Math.sin(phi);
+    supportAngles[col] = Math.abs(phi - Math.round(phi / supportAngle) * supportAngle);
+    let scale = 1;
+    if (shapeRadii?.length) {
+      const index = col / columns * shapeRadii.length;
+      const i = Math.floor(index), fraction = index - i;
+      scale = shapeRadii[i] * (1 - fraction) + shapeRadii[(i + 1) % shapeRadii.length] * fraction;
+    } else if (sides) {
+      scale = 1 / Math.cos(phi - Math.round(phi / sideAngle) * sideAngle);
     }
-  } else {
-    rProfile.fill(R);
+    scales[col] = scale;
+    minimumScale = Math.min(minimumScale, scale);
   }
 
-
-  const hasBottom = document.getElementById('bottomStyle').value === 'closed';
-  const bottomHoleDiam = parseFloat(S.bottomHoleDiam.el.value);
-  const numBottomVerts = hasBottom ? nPhi * 4 : 0;
-
-  const dzStep = H / nZ;
-  const dPhi   = (2 * Math.PI) / nPhi;
-
-  // Vertex grid (nZ+1) * nPhi + bottom plate
-  // Helper: compute scale factor for a given phi angle
-  function getShapeScale(phi) {
-    if (activeShapeRadii) {
-      // Interpolate shape radii at this angle
-      let angleDeg = ((phi * 180 / Math.PI) % 360 + 360) % 360;
-      const idx0 = Math.floor(angleDeg) % 360;
-      const idx1 = (idx0 + 1) % 360;
-      const frac = angleDeg - Math.floor(angleDeg);
-      return activeShapeRadii[idx0] * (1 - frac) + activeShapeRadii[idx1] * frac;
-    } else if (nSides >= 3) {
-      const segment = (2 * Math.PI) / nSides;
-      const theta = (((phi + segment / 2.0) % segment) + segment) % segment - (segment / 2.0);
-      return 1.0 / Math.cos(theta);
+  const profile = shapeCustom.checked && profileData ? profileData
+    : shapeMatchPattern.checked && patternProfileData ? patternProfileData : null;
+  const radii = new Float32Array(rows + 1).fill(radius);
+  if (profile?.length) {
+    for (let row = 0; row <= rows; row++) {
+      const sample = row / rows * (profile.length - 1);
+      const lo = Math.floor(sample), hi = Math.min(lo + 1, profile.length - 1);
+      radii[row] = radius * Math.max(0.02, profile[lo] + (profile[hi] - profile[lo]) * (sample - lo));
     }
-    return 1.0;
   }
 
-  const isLitho = isLantern && lithoEnable && lithoEnable.checked && lithoData;
-  const tMin = lithoMinThick ? parseFloat(lithoMinThick.value) : 1.2;
-  const tMax = lithoMaxThick ? parseFloat(lithoMaxThick.value) : 3.0;
-  const repeat = lithoRepeat ? parseInt(lithoRepeat.value) : 1;
-  const inv = lithoInvert ? lithoInvert.checked : false;
+  const shadowWidth = Number(S.shadowSize.el.value);
+  const { width, height: imageHeight, data } = image;
+  const shadowHeight = shadowWidth * imageHeight / width;
+  const nodeCount = (rows + 1) * columns;
+  const field = new Float32Array(nodeCount);
+  const horizontal = new Float32Array(nodeCount);
+  const wallMaskHeight = hasHood ? lowerHeight : height;
+  for (let row = 0; row <= rows; row++) {
+    const y = row * rowHeight;
+    const floorProjection = y < lightHeight
+      ? radii[row] * (lightHeight + plateThickness) / (lightHeight - y)
+      : 0;
+    const offset = row * columns;
+    for (let col = 0; col < columns; col++) {
+      let mask = -1;
+      if (wall) {
+        const u = col / columns * width - 0.5;
+        const v = (1 - y / wallMaskHeight) * imageHeight - 0.5;
+        mask = (128 - samplePreviewImage(data, width, imageHeight, u, v, true)) / 128;
+      } else if (floorProjection) {
+        const r = floorProjection * scales[col];
+        const u = (r * cosines[col] / shadowWidth + 0.5) * width;
+        const v = (r * sines[col] / shadowHeight + 0.5) * imageHeight;
+        const margin = Math.min(u, width - u, v, imageHeight - v);
+        if (margin >= 0) {
+          mask = Math.min(margin, (128 - samplePreviewImage(data, width, imageHeight, u - 0.5, v - 0.5, false)) / 128);
+        }
+      }
+      field[offset + col] = mask;
+    }
 
-  const hasTopRoof = keepUpperShell || isLantern;
-  const numRoofVerts = hasTopRoof ? 1 : 0;
-  const totalVertCount = (nZ + 1) * nPhi + numBottomVerts + numRoofVerts;
-  const verts = new Float32Array(totalVertCount * 3);
-  const colors = new Float32Array(totalVertCount * 3);
+    // Separate, periodic blur passes round contour samples without a seam.
+    for (let col = 0; col < columns; col++) {
+      const left = (col + columns - 1) % columns;
+      const right = (col + 1) % columns;
+      horizontal[offset + col] = (field[offset + left] + 2 * field[offset + col] + field[offset + right]) / 4;
+    }
+  }
+  for (let row = 0; row <= rows; row++) {
+    const offset = row * columns;
+    const below = Math.max(0, row - 1) * columns;
+    const above = Math.min(rows, row + 1) * columns;
+    const y = row * rowHeight;
+    for (let col = 0; col < columns; col++) {
+      let mask = (horizontal[below + col] + 2 * horizontal[offset + col] + horizontal[above + col]) / 4;
+      if (!wall && y >= lightHeight) mask = -1;
+      if (hasHood && y >= hoodStart) mask = 1;
+      if (supportCount) {
+        const support = (supportHalfWidth - supportAngles[col] * radii[row]) / (angleStep * radii[row]);
+        mask = Math.max(mask, Math.min(1, support));
+      }
+      if (row <= 1) mask = 1;
+      field[offset + col] = mask > 0 ? Math.max(0.001, mask) : Math.min(-0.001, mask);
+    }
+  }
 
-  // Modern matte slate base color for lower shadow lamp body
+  const yApex = height + (hasHood ? lantern ? 10 : 5 : 0);
+  const plateVertices = plateThickness ? 5 * columns + 2 : 0;
+  const vertexCount = nodeCount + plateVertices + (hasHood ? 1 : 0);
+  const positions = new Float32Array(vertexCount * 3);
+  const colors = new Float32Array(positions.length);
+  const caps = [];
+  const litho = lantern && lithoEnable?.checked && lithoData;
+  const minLitho = Number(lithoMinThick?.value ?? 1.2);
+  const maxLitho = Number(lithoMaxThick?.value ?? 3);
+  const invertLitho = lithoInvert?.checked;
+  const repeatLitho = Number(lithoRepeat?.value) || 1;
   const baseColor = [0.42, 0.48, 0.58];
-  const lanternWhiteColor = [0.94, 0.94, 0.96];
+  const hoodColor = [0.94, 0.94, 0.96];
 
-  for (let i = 0; i <= nZ; i++) {
-    const y = i * dzStep;  // Y-up in Three.js
-    const r_base = rProfile[i];
-    const isUpper = y >= H_base - 1e-4;
-
-    for (let j = 0; j < nPhi; j++) {
-      const phi = j * dPhi;
-      const scale = getShapeScale(phi);
-      let r = r_base * scale;
-
-      let rCol = baseColor[0], gCol = baseColor[1], bCol = baseColor[2];
-
-      if (isUpper && (isLantern || keepUpperShell)) {
-        if (isLitho && upperShellHeight > 0 && lithoData) {
-          // Direct 360° unwrapped plane mapping:
-          // phi in [0, 2*PI] maps directly to horizontal u in [0, 1]
-          const phiNorm = ((phi / (2 * Math.PI)) % 1.0 + 1.0) % 1.0;
-          const u = phiNorm * (lithoData.width - 1);
-
-          // y in [H_base, H_base + upperShellHeight] maps to vertical v in [0, 1]
-          const yNorm = Math.min(1.0, Math.max(0.0, (y - H_base) / upperShellHeight));
-          const v = (1.0 - yNorm) * (lithoData.height - 1);
-
-          let g = bilinearSample(lithoData.data, lithoData.width, lithoData.height, u, v);
-          if (inv) g = 255 - g;
-          const reliefThick = tMin + (1.0 - g / 255.0) * (tMax - tMin);
-          r += reliefThick;
-
-          // Warm translucent PLA lithophane backlighting:
-          const factor = 1.0 - g / 255.0; // 0 (brightest, thinnest) -> 1 (darkest, thickest)
-          rCol = 1.00 - factor * 0.58;
-          gCol = 0.97 - factor * 0.64;
-          bCol = 0.91 - factor * 0.69;
-        } else {
-          // White translucent lantern hood
-          rCol = lanternWhiteColor[0];
-          gCol = lanternWhiteColor[1];
-          bCol = lanternWhiteColor[2];
-        }
+  for (let row = 0; row <= rows; row++) {
+    const y = row * rowHeight;
+    const upper = hasHood && y >= hoodStart - 1e-4;
+    const reliefRow = upper && litho && hoodHeight > 0;
+    const lithoY = reliefRow
+      ? (1 - Math.max(0, Math.min(1, (y - hoodStart) / hoodHeight))) * (litho.height - 1)
+      : 0;
+    for (let col = 0; col < columns; col++) {
+      const index = (row * columns + col) * 3;
+      let thickness = wallThickness;
+      let [red, green, blue] = upper ? hoodColor : baseColor;
+      if (reliefRow) {
+        const u = col / columns * repeatLitho * litho.width - 0.5;
+        const gray = samplePreviewImage(litho.data, litho.width, litho.height, u, lithoY, true) / 255;
+        const darkness = invertLitho ? gray : 1 - gray;
+        thickness = minLitho + darkness * (maxLitho - minLitho);
+        red = 1 - darkness * 0.58;
+        green = 0.97 - darkness * 0.64;
+        blue = 0.91 - darkness * 0.69;
       }
-
-      const idx = (i * nPhi + j) * 3;
-      verts[idx]     = r * Math.cos(phi);
-      verts[idx + 1] = y;
-      verts[idx + 2] = r * Math.sin(phi);
-
-      colors[idx]     = rCol;
-      colors[idx + 1] = gCol;
-      colors[idx + 2] = bCol;
+      const r = (radii[row] + thickness) * scales[col];
+      positions[index] = r * cosines[col];
+      positions[index + 1] = y;
+      positions[index + 2] = r * sines[col];
+      colors[index] = red;
+      colors[index + 1] = green;
+      colors[index + 2] = blue;
     }
   }
 
-  // Bottom disc vertices colors
-  if (numBottomVerts > 0) {
-    const vOffset = (nZ + 1) * nPhi;
-    for (let k = 0; k < numBottomVerts; k++) {
-      const idx = (vOffset + k) * 3;
-      colors[idx]     = baseColor[0];
-      colors[idx + 1] = baseColor[1];
-      colors[idx + 2] = baseColor[2];
+  if (plateThickness) {
+    const holeRadius = Math.max(0, Math.min(Number(S.bottomHoleDiam.el.value) / 2, radii[0] * minimumScale - 0.1));
+    function plateVertex(id, r, y, col) {
+      positions[id * 3] = r * cosines[col];
+      positions[id * 3 + 1] = y;
+      positions[id * 3 + 2] = r * sines[col];
+      colors.set(baseColor, id * 3);
     }
-  }
 
-  let yApex = solidTopZ;
-  if (hasTopRoof) {
-    yApex = solidTopZ + (isLantern ? 10 : 5);
-    const apexIdx = (nZ + 1) * nPhi + numBottomVerts;
-    verts[apexIdx * 3 + 0] = 0;
-    verts[apexIdx * 3 + 1] = yApex;
-    verts[apexIdx * 3 + 2] = 0;
-
-    colors[apexIdx * 3 + 0] = isLantern ? 0.96 : baseColor[0];
-    colors[apexIdx * 3 + 1] = isLantern ? 0.94 : baseColor[1];
-    colors[apexIdx * 3 + 2] = isLantern ? 0.90 : baseColor[2];
-  }
-
-  if (projMode === 'wall') {
-    floorMesh.visible = false;
-    wallMesh.visible = true;
-  } else {
-    floorMesh.visible = true;
-    wallMesh.visible = false;
-  }
-  const indices = [];
-  let solidN = 0, totalN = 0;
-
-  // --- Pass 1: compute per-column solid state below hLight ---
-  // solidGrid[i][j] = true if cell (i,j) is solid from ray-trace
-  const solidGrid = [];
-  for (let i = 0; i < nZ; i++) {
-    solidGrid[i] = new Uint8Array(nPhi);
-    const zC = (i + 0.5) * dzStep;
-    const rC = (rProfile[i] + rProfile[i + 1]) / 2;
-    for (let j = 0; j < nPhi; j++) {
-      const phiC = (j + 0.5) * dPhi;
-      let solid = false;
-
-      if (projMode === 'wall') {
-        const uF = (j / nPhi) * W;
-        const vF = (1 - (i / nZ)) * IH;
-        solid = bilinearSample(gray, W, IH, uF, vF) < 128;
-      } else if (zC < hLight - 1e-6) {
-        const t = hLight / (hLight - zC);
-        const scale = getShapeScale(phiC);
-        const rC_poly = rC * scale;
-        const xF = rC_poly * Math.cos(phiC) * t;
-        const zF = rC_poly * Math.sin(phiC) * t;
-        const uF = (xF / shadowW + 0.5) * W;
-        const vF = (zF / shadowH + 0.5) * IH;
-        if (uF >= 0 && uF < W && vF >= 0 && vF < IH) {
-          solid = bilinearSample(gray, W, IH, uF, vF) < 128;
-        }
-      }
-
-      // Support columns
-      if (supportCount > 0) {
-        const angleStep = (2 * Math.PI) / supportCount;
-        for (let k = 0; k < supportCount; k++) {
-          let diff = Math.abs(phiC - k * angleStep);
-          diff = Math.min(diff, 2 * Math.PI - diff);
-          if (diff < (supportWidth / 2.0) / rC) { solid = true; break; }
-        }
-      }
-
-      if (i === 0) solid = true;
-      solidGrid[i][j] = solid ? 1 : 0;
-    }
-  }
-
-  // --- Per-column top limit (solid upper shell hood vs hollow cutouts) ---
-  const colLimit = new Float32Array(nPhi);
-  if (projMode !== 'wall') {
-    if (hasUpperHood) {
-      colLimit.fill(solidTopZ);
-    } else {
-      for (let j = 0; j < nPhi; j++) {
-        let topZ = 0;
-        for (let i = 0; i < nZ; i++) {
-          const zC = (i + 0.5) * dzStep;
-          if (zC < hLight && solidGrid[i][j]) topZ = zC;
-        }
-        colLimit[j] = topZ;
-      }
-    }
-  } else {
-    colLimit.fill(H);
-  }
-
-  // --- Pass 2: build final solid state and index buffer ---
-  for (let i = 0; i < nZ; i++) {
-    const zC = (i + 0.5) * dzStep;
-    const rC = (rProfile[i] + rProfile[i + 1]) / 2;
-    for (let j = 0; j < nPhi; j++) {
-      const phiC = (j + 0.5) * dPhi;
-      totalN++;
-      let solid;
-      if (zC < hLight - 1e-6) {
-        // Lower shadow lamp body: strictly follow shadow stencils / ray-tracing
-        solid = !!solidGrid[i][j];
+    const bottom = nodeCount;
+    const outerTop = bottom + columns;
+    const plateTop = outerTop + columns;
+    const holeBottom = plateTop + columns;
+    const holeTop = holeBottom + columns;
+    const topCenter = holeTop + columns;
+    const bottomCenter = topCenter + 1;
+    plateVertex(topCenter, 0, 0, 0);
+    plateVertex(bottomCenter, 0, -plateThickness, 0);
+    for (let col = 0; col < columns; col++) {
+      const next = (col + 1) % columns;
+      const outer = (radii[0] + wallThickness) * scales[col];
+      plateVertex(bottom + col, outer, -plateThickness, col);
+      plateVertex(outerTop + col, outer, 0, col);
+      plateVertex(plateTop + col, outer, 0, col);
+      caps.push(outerTop + col, outerTop + next, bottom + next, outerTop + col, bottom + next, bottom + col);
+      if (holeRadius) {
+        plateVertex(holeBottom + col, holeRadius, -plateThickness, col);
+        plateVertex(holeTop + col, holeRadius, 0, col);
+        caps.push(
+          plateTop + col, holeTop + col, holeTop + next, plateTop + col, holeTop + next, plateTop + next,
+          bottom + col, bottom + next, holeBottom + next, bottom + col, holeBottom + next, holeBottom + col,
+          holeTop + col, holeBottom + col, holeBottom + next, holeTop + col, holeBottom + next, holeTop + next,
+        );
       } else {
-        // Upper shell: solid lantern hood (with relief if uploaded)
-        solid = hasUpperHood ? (zC < solidTopZ) : (zC < colLimit[j]);
-      }
-
-      // Ensure support columns extend all the way up to the lantern roof/cap
-      if (supportCount > 0) {
-        const angleStep = (2 * Math.PI) / supportCount;
-        for (let k = 0; k < supportCount; k++) {
-          let diff = Math.abs(phiC - k * angleStep);
-          diff = Math.min(diff, 2 * Math.PI - diff);
-          if (diff < (supportWidth / 2.0) / rC) {
-            solid = true;
-            break;
-          }
-        }
-      }
-
-      if (solid) {
-        solidN++;
-        const v00 = i * nPhi + j;
-        const v01 = i * nPhi + (j + 1) % nPhi;
-        const v10 = (i + 1) * nPhi + j;
-        const v11 = (i + 1) * nPhi + (j + 1) % nPhi;
-        indices.push(v00, v01, v11, v00, v11, v10);
+        caps.push(plateTop + col, topCenter, plateTop + next, bottom + col, bottom + next, bottomCenter);
       }
     }
   }
 
-  if (hasBottom) {
-    const rHoleDiam = Math.min(bottomHoleDiam / 2.0, R - 5.0);
-    const tPlate = parseFloat(S.thickness.el.value);
-    
-    const startIdx = (nZ + 1) * nPhi * 3;
-    for (let j = 0; j < nPhi; j++) {
-      const phi = j * dPhi;
-      const scale = getShapeScale(phi);
-      
-      const rInner0 = rProfile[0] * scale;
-      const tRatio = tPlate / H;
-      const tNode = tRatio * nZ;
-      const lo = Math.floor(tNode), hi = Math.min(lo + 1, nZ);
-      const rInnerT = (rProfile[lo] + (rProfile[hi] - rProfile[lo]) * (tNode - lo)) * scale;
-
-      const idxIb0 = startIdx + (0 * nPhi + j) * 3;
-      const idxIbt = startIdx + (1 * nPhi + j) * 3;
-      const idxHb0 = startIdx + (2 * nPhi + j) * 3;
-      const idxHbt = startIdx + (3 * nPhi + j) * 3;
-
-      const cosP = Math.cos(phi);
-      const sinP = Math.sin(phi);
-
-      verts[idxIb0]     = rInner0 * cosP;
-      verts[idxIb0 + 1] = 0;
-      verts[idxIb0 + 2] = rInner0 * sinP;
-
-      verts[idxIbt]     = rInnerT * cosP;
-      verts[idxIbt + 1] = tPlate;
-      verts[idxIbt + 2] = rInnerT * sinP;
-
-      verts[idxHb0]     = rHoleDiam * cosP;
-      verts[idxHb0 + 1] = 0;
-      verts[idxHb0 + 2] = rHoleDiam * sinP;
-
-      verts[idxHbt]     = rHoleDiam * cosP;
-      verts[idxHbt + 1] = tPlate;
-      verts[idxHbt + 2] = rHoleDiam * sinP;
-    }
-
-    const vOffset = (nZ + 1) * nPhi;
-    for (let j = 0; j < nPhi; j++) {
-      const jp1 = (j + 1) % nPhi;
-
-      const ib0 = vOffset + 0 * nPhi + j;
-      const ibt = vOffset + 1 * nPhi + j;
-      const hb0 = vOffset + 2 * nPhi + j;
-      const hbt = vOffset + 3 * nPhi + j;
-
-      const ib0_jp1 = vOffset + 0 * nPhi + jp1;
-      const ibt_jp1 = vOffset + 1 * nPhi + jp1;
-      const hb0_jp1 = vOffset + 2 * nPhi + jp1;
-      const hbt_jp1 = vOffset + 3 * nPhi + jp1;
-
-      indices.push(ib0, hb0_jp1, hb0);
-      indices.push(ib0, ib0_jp1, hb0_jp1);
-
-      indices.push(ibt, ibt_jp1, hbt_jp1);
-      indices.push(ibt, hbt_jp1, hbt);
-
-      indices.push(hb0, hbt, hbt_jp1);
-      indices.push(hb0, hbt_jp1, hb0_jp1);
+  if (hasHood) {
+    const apex = vertexCount - 1;
+    positions[apex * 3 + 1] = yApex;
+    colors.set(lantern ? hoodColor : baseColor, apex * 3);
+    const top = rows * columns;
+    for (let col = 0; col < columns; col++) {
+      caps.push(apex, top + (col + 1) % columns, top + col);
     }
   }
 
-  // Top roof cap facets connecting top active ring to apex
-  if (hasTopRoof) {
-    const apexIdx = (nZ + 1) * nPhi + numBottomVerts;
-    const topI = nZ;
-    for (let j = 0; j < nPhi; j++) {
-      const jp1 = (j + 1) % nPhi;
-      indices.push(apexIdx, topI * nPhi + j, topI * nPhi + jp1);
-    }
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  return { geo, solidN, totalN, yApex };
+  floorMesh.visible = !wall;
+  floorMesh.position.y = -plateThickness - 0.01;
+  wallMesh.visible = wall;
+  return { ...contourPreviewGeometry(field, rows, columns, positions, colors, caps), yApex };
 }
 
 function updatePreview() {
@@ -1844,8 +1741,23 @@ function updatePreview() {
       previewMesh.material.dispose();
       previewMesh = null;
     }
+    // Hanging Hook (顶部挂钩)
+    if (hookMesh) {
+      scene.remove(hookMesh);
+      hookMesh.children.forEach(c => {
+        if (c.geometry) c.geometry.dispose();
+        if (c.material) c.material.dispose();
+      });
+      hookMesh = null;
+    }
     const r = buildPreview();
-    if (!r) return;
+    if (!r) {
+      document.getElementById('emptyStage').hidden = false;
+      triCount.textContent = '—';
+      needsCameraFit = true;
+      requestRender();
+      return;
+    }
 
     previewMesh = new THREE.Mesh(r.geo, new THREE.MeshStandardMaterial({
       vertexColors: true,
@@ -1856,18 +1768,10 @@ function updatePreview() {
     previewMesh.castShadow = true;
     previewMesh.receiveShadow = true;
     scene.add(previewMesh);
+    document.getElementById('emptyStage').hidden = true;
 
-    // Hanging Hook (顶部挂钩)
-    if (hookMesh) {
-      scene.remove(hookMesh);
-      hookMesh.children.forEach(c => {
-        if (c.geometry) c.geometry.dispose();
-        if (c.material) c.material.dispose();
-      });
-      hookMesh = null;
-    }
-    const isLantern = shapeLantern && shapeLantern.checked;
-    const showHook = (topHookToggle && topHookToggle.checked) || isLantern;
+    grid.visible = floorMesh.visible;
+    const showHook = hasUpperHood() && topHookToggle.checked;
     if (showHook && r) {
       const hookY = r.yApex || parseFloat(S.height.el.value) || 100;
       const group = new THREE.Group();
@@ -1897,17 +1801,22 @@ function updatePreview() {
       scene.add(hookMesh);
     }
 
-    triCount.textContent = `Faces: ${r.solidN * 2} | Holes: ${r.totalN - r.solidN}`;
+    const triangleCount = (r.geo.index || r.geo.attributes.position).count / 3;
+    triCount.textContent = triangleCount.toLocaleString() + ' 个三角面';
+    if (needsCameraFit) {
+      setCameraView('perspective');
+      needsCameraFit = false;
+    }
     updateLightPos();
-    logDebug(`3D Mesh generated: ${r.solidN * 2} faces`, '#74c0fc');
   } catch (err) {
     console.error("Preview render error:", err);
-    setStatus('error', `Preview error: ${err.message}`);
+    setStatus('error', `预览失败：${err.message}`);
     logDebug(`Preview render error: ${err.message}`, '#ff6b6b');
   }
 }
 
 function scheduleUpdate() {
+  syncExportButton();
   clearTimeout(debounce);
   debounce = setTimeout(updatePreview, 80);
 }
@@ -1918,15 +1827,6 @@ function scheduleUpdate() {
 for (const [key, s] of Object.entries(S)) {
   s.el.addEventListener('input', () => {
     s.vEl.textContent = s.fmt(s.el.value);
-    if (key === 'height') {
-      // Sync bulb height with lower shell height
-      S.bulbHeight.el.value = s.el.value;
-      S.bulbHeight.vEl.textContent = s.el.value + ' mm';
-    }
-    if (key === 'upperShellHeight' && lithoHeight) {
-      lithoHeight.value = s.el.value;
-      if (lithoHeightVal) lithoHeightVal.textContent = s.el.value + ' mm';
-    }
     if (key === 'brightness' || key === 'bulbHeight' || key === 'height') {
       updateLightPos();
     }
@@ -1936,18 +1836,26 @@ for (const [key, s] of Object.entries(S)) {
   });
 }
 
+function hasUpperHood() {
+  return shapeLantern.checked || (document.getElementById('projFloor').checked &&
+    document.getElementById('upperShell').value === 'solid');
+}
+
 function updateVisibility() {
-  const upperShell = document.getElementById('upperShell').value;
-  const projMode = document.querySelector('input[name="projMode"]:checked').value;
+  document.getElementById('supportWidthRow').hidden = +document.getElementById('supportCount').value === 0;
+  document.getElementById('topHookRow').hidden = !hasUpperHood();
+  document.getElementById('upperShell').disabled = shapeLantern.checked || document.getElementById('projWall').checked;
   const upperShellHeightRow = document.getElementById('upperShellHeightRow');
-  if (upperShell === 'solid' && projMode === 'floor') {
+  if (hasUpperHood()) {
     upperShellHeightRow.style.display = '';
   } else {
     upperShellHeightRow.style.display = 'none';
   }
 
+  document.getElementById('upperShell').closest('label').hidden = shapeLantern.checked;
   if (lanternLithoSection) {
-    lanternLithoSection.style.display = (shapeLantern && shapeLantern.checked) ? '' : 'none';
+    lanternLithoSection.style.display = shapeLantern.checked ? '' : 'none';
+    document.getElementById('reliefEditor').hidden = !lithoEnable.checked;
   }
 
   const bottomStyle = document.getElementById('bottomStyle').value;
@@ -1974,87 +1882,99 @@ document.getElementById('baseShape').addEventListener('change', () => {
 });
 document.getElementById('upperShell').addEventListener('change', () => { updateVisibility(); scheduleUpdate(); });
 document.getElementById('bottomStyle').addEventListener('change', () => { updateVisibility(); scheduleUpdate(); });
-document.getElementById('supportCount').addEventListener('change', scheduleUpdate);
+document.getElementById('supportCount').addEventListener('change', () => { updateVisibility(); scheduleUpdate(); });
 
 // ============================================================
 // Download STL
 // ============================================================
 downloadBtn.addEventListener('click', async () => {
-  if (!uploadedFile) return;
-  showLoading('Generating STL — please wait…');
+  if (activeExport || (!silhouetteMaskBlob && !reliefSuppliesProjection())) return;
+  const request = new AbortController();
+  activeExport = request;
+  showLoading('正在生成 STL…');
   downloadBtn.disabled = true;
 
-  const fd = new FormData();
-  fd.append('image', uploadedFile);
-  fd.append('threshold', silThreshold ? silThreshold.value : '128');
-  fd.append('invert', invertSilhouette && invertSilhouette.checked ? 'true' : 'false');
-  fd.append('radius', parseFloat(S.diameter.el.value) / 2);
-  fd.append('height', S.height.el.value);
-  fd.append('thickness', S.thickness.el.value);
-  fd.append('shadow_size', S.shadowSize.el.value);
-  fd.append('resolution', S.resolution.el.value);
-  fd.append('bulb_height', S.bulbHeight.el.value);
-  const baseShapeVal = document.getElementById('baseShape').value;
-  fd.append('base_shape', baseShapeVal);
-  fd.append('keep_upper_shell', document.getElementById('upperShell').value === 'solid' ? 'true' : 'false');
-  fd.append('upper_shell_height', S.upperShellHeight.el.value);
-  fd.append('support_count', document.getElementById('supportCount').value);
-  fd.append('support_width', S.supportWidth.el.value);
-  fd.append('with_bottom', document.getElementById('bottomStyle').value === 'closed' ? 'true' : 'false');
-  fd.append('bottom_hole_diam', S.bottomHoleDiam.el.value);
-  fd.append('bottom_thickness', S.bottomThickness.el.value);
-  const projMode = document.querySelector('input[name="projMode"]:checked').value;
-  fd.append('proj_mode', projMode);
-  const isLanternVal = shapeLantern && shapeLantern.checked;
-  const isLithoActive = isLanternVal && lithoEnable && lithoEnable.checked && (lithoLayers.length > 0 || lithoFile);
-  fd.append('shell_shape', isLanternVal ? 'lantern' : shapeCustom.checked ? 'custom' : shapeMatchPattern.checked ? 'match_pattern' : 'cylinder');
-  fd.append('with_top_hook', ((topHookToggle && topHookToggle.checked) || isLanternVal) ? 'true' : 'false');
-  if (isLithoActive) {
-    if (lithoLayers.length > 0) {
-      const compBlob = await getLithoCompositeBlob();
-      if (compBlob) {
-        fd.append('litho_image', compBlob, 'litho_composite.png');
-      } else if (lithoFile) {
-        fd.append('litho_image', lithoFile);
-      }
-    } else if (lithoFile) {
-      fd.append('litho_image', lithoFile);
-    }
-    fd.append('litho_min_thick', lithoMinThick.value);
-    fd.append('litho_max_thick', lithoMaxThick.value);
-    fd.append('litho_repeat', '1');
-    fd.append('litho_invert', lithoInvert.checked ? 'true' : 'false');
-    fd.append('litho_width_scale', '100');
-    fd.append('litho_height_scale', '100');
-    fd.append('litho_offset', '0');
-  }
-  if (shapeCustom.checked && profileFile) fd.append('profile', profileFile);
-  if (shapeMatchPattern.checked && patternProfileData) {
-    fd.append('pattern_profile', JSON.stringify(Array.from(patternProfileData)));
-  }
-  if (baseShapeVal === 'custom' && customShapeRadii) {
-    fd.append('custom_shape_radii', JSON.stringify(Array.from(customShapeRadii)));
-  }
-  if (baseShapeVal === 'match_pattern' && patternShapeRadii) {
-    fd.append('custom_shape_radii', JSON.stringify(Array.from(patternShapeRadii)));
-  }
-
   try {
-    const resp = await fetch('/api/generate', { method: 'POST', body: fd });
+    const fd = new FormData();
+    const isLanternVal = shapeLantern.checked;
+    const isLithoActive = isLanternVal && lithoEnable.checked && lithoLayers.length > 0;
+    const mask = silhouetteMaskBlob;
+    const original = uploadedFile;
+    const compBlob = isLithoActive ? await getLithoCompositeBlob() : null;
+    if (isLithoActive && !compBlob) throw new Error('无法读取浮雕图案。');
+    if (request.signal.aborted) return;
+    fd.append('image', original || compBlob, original?.name || 'relief.png');
+    fd.append('silhouette_mask', mask || compBlob, 'silhouette-mask.png');
+    fd.append('threshold', silThreshold ? silThreshold.value : '128');
+    fd.append('invert', invertSilhouette && invertSilhouette.checked ? 'true' : 'false');
+    fd.append('radius', parseFloat(S.diameter.el.value) / 2);
+    fd.append('height', S.height.el.value);
+    fd.append('thickness', S.thickness.el.value);
+    fd.append('shadow_size', S.shadowSize.el.value);
+    fd.append('resolution', S.resolution.el.value);
+    fd.append('bulb_height', S.bulbHeight.el.value);
+    const baseShapeVal = document.getElementById('baseShape').value;
+    fd.append('base_shape', baseShapeVal);
+    fd.append('keep_upper_shell', hasUpperHood() ? 'true' : 'false');
+    fd.append('upper_shell_height', S.upperShellHeight.el.value);
+    fd.append('support_count', document.getElementById('supportCount').value);
+    fd.append('support_width', S.supportWidth.el.value);
+    fd.append('with_bottom', document.getElementById('bottomStyle').value === 'closed' ? 'true' : 'false');
+    fd.append('bottom_hole_diam', S.bottomHoleDiam.el.value);
+    fd.append('bottom_thickness', S.bottomThickness.el.value);
+    const projMode = document.querySelector('input[name="projMode"]:checked').value;
+    fd.append('proj_mode', projMode);
+    fd.append('shell_shape', isLanternVal ? 'lantern' : shapeCustom.checked ? 'custom' : shapeMatchPattern.checked ? 'match_pattern' : 'cylinder');
+    fd.append('with_top_hook', (hasUpperHood() && topHookToggle.checked) ? 'true' : 'false');
+    if (isLithoActive) {
+      fd.append('litho_image', compBlob, 'litho_composite.png');
+      fd.append('litho_min_thick', lithoMinThick.value);
+      fd.append('litho_max_thick', lithoMaxThick.value);
+      fd.append('litho_repeat', lithoRepeat.value);
+      fd.append('litho_invert', lithoInvert.checked ? 'true' : 'false');
+      fd.append('litho_width_scale', '100');
+      fd.append('litho_height_scale', '100');
+      fd.append('litho_offset', '0');
+    }
+    if (shapeCustom.checked && profileFile) fd.append('profile', profileFile);
+    if (shapeMatchPattern.checked && patternProfileData) {
+      fd.append('pattern_profile', JSON.stringify(Array.from(patternProfileData)));
+    }
+    if (baseShapeVal === 'custom' && customShapeRadii) {
+      fd.append('custom_shape_radii', JSON.stringify(Array.from(customShapeRadii)));
+    }
+    if (baseShapeVal === 'match_pattern' && patternShapeRadii) {
+      fd.append('custom_shape_radii', JSON.stringify(Array.from(patternShapeRadii)));
+    }
+
+    const resp = await fetch('/api/generate', { method: 'POST', body: fd, signal: request.signal });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: resp.statusText }));
       throw new Error(err.error || 'Generation failed');
     }
     const data = await resp.json();
     
-    setStatus('ready', 'Downloading...');
-    window.location.href = data.url;
-    setStatus('ready', 'STL downloaded ✓');
+    setStatus('ready', '正在下载…');
+    const result = await fetch(data.url, {signal: request.signal});
+    if (!result.ok) throw new Error('Could not download the generated STL.');
+    const blobUrl = URL.createObjectURL(await result.blob());
+    if (!request.signal.aborted) {
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = 'shadow_lamp.stl';
+      link.click();
+    }
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    if (request.signal.aborted) return;
+    setStatus('ready', 'STL 已下载');
   } catch (e) {
-    setStatus('error', `Error: ${e.message}`);
+    if (!request.signal.aborted) setStatus('error', '导出失败：' + e.message);
   } finally {
-    hideLoading();
-    downloadBtn.disabled = false;
+    if (activeExport === request) {
+      activeExport = null;
+      hideLoading();
+      syncExportButton();
+    }
   }
 });
 
@@ -2062,26 +1982,28 @@ downloadBtn.addEventListener('click', async () => {
 // Reset
 // ============================================================
 resetBtn.addEventListener('click', () => {
-  uploadedFile = profileFile = imageData = profileData = null;
-  customShapeImageData = null;
+  uploadEpoch++;
+  resetSilhouetteUpload();
+  profileFile = profileData = null;
+  customShapeImageData = customShapeUploadCurrent = null;
   customShapeRadii = null;
-  patternShapeRadii = null;
-  patternProfileData = null;
   downloadBtn.disabled = true;
   fileInput.value = '';
   profileInput.value = '';
   customShapeInput.value = '';
 
-  [uploadZone, profileZone, customShapeZone].forEach((z, idx) => {
-    const labels = [
-      ['🌗', 'Drop silhouette image here', 'PNG / JPG — black & white'],
-      ['🏺', 'Drop profile side-view', 'Black silhouette on white'],
-      ['✂️', 'Drop shape image here', 'PNG / JPG — black silhouette on white'],
-    ][idx];
-    z.innerHTML = `<div class="icon">${labels[0]}</div><div class="label">${labels[1]}</div><div class="sublabel">${labels[2]}</div>`;
-    z.classList.remove('has-image');
-  });
-
+  activeExport?.abort();
+  activeExport = null;
+  hideLoading();
+  clearTimeout(debounce);
+  clearLithoLayers();
+  for (const zone of [uploadZone, profileZone, customShapeZone, lithoZone]) {
+    zone.querySelector('img')?.remove();
+    zone.classList.remove('has-image');
+    for (const label of zone.querySelectorAll('.icon, .label, .sublabel')) label.style.display = '';
+  }
+  renderer.shadowMap.needsUpdate = true;
+  requestRender();
   customShapeStatus.style.display = 'none';
   customShapeSection.style.display = 'none';
   matchPatternSection.style.display = 'none';
@@ -2097,33 +2019,30 @@ resetBtn.addEventListener('click', () => {
     hookMesh = null;
   }
   if (previewMesh) { scene.remove(previewMesh); previewMesh.geometry.dispose(); previewMesh.material.dispose(); previewMesh = null; }
-  triCount.textContent = 'Faces: —';
-  setStatus('', 'No image loaded');
+  needsCameraFit = true;
+  document.getElementById('emptyStage').hidden = false;
+  triCount.textContent = '—';
+  syncExportButton();
+  setStatus('', '等待上传图案');
 });
 
 // Demo Button
 const demoBtn = document.getElementById('demoBtn');
 if (demoBtn) {
-  demoBtn.addEventListener('click', async (e) => {
+  demoBtn.addEventListener('click', async e => {
     e.stopPropagation();
+    const revision = beginSilhouetteUpload('demo pattern');
     try {
-      setStatus('loading', 'Loading demo pattern...');
       const response = await fetch('/test_star.png');
-      if (!response.ok) throw new Error('Failed to fetch demo image');
+      if (!response.ok) throw new Error('Failed to fetch demo image.');
       const blob = await response.blob();
+      if (revision !== silhouetteUploadRevision) return;
       const file = new File([blob], 'test_star.png', { type: 'image/png' });
-      uploadedFile = file;
-      uploadedDataUrl = dataUrl;
-      loadSmartSilhouette(dataUrl, (w, h, gray, binarizedDataUrl) => {
-        imageData = { width: w, height: h, data: gray };
-        downloadBtn.disabled = false;
-        showThumb(uploadZone, binarizedDataUrl || dataUrl);
-        setStatus('ready', `Demo loaded: ${w}×${h}`);
-        extractPatternRadialProfile();
-        scheduleUpdate();
-      });
-    } catch (err) {
-      setStatus('error', 'Failed to load demo: ' + err.message);
+      await loadSilhouetteUpload(file, revision, '示例');
+    } catch (error) {
+      if (revision === silhouetteUploadRevision && !activeExport) {
+        setStatus('error', '示例加载失败：' + error.message);
+      }
     }
   });
 }
@@ -2135,4 +2054,61 @@ function setStatus(state, text) { statusDot.className = 'status-dot ' + state; s
 function showLoading(t) { loadingTextEl.textContent = t; loadingOverlay.classList.add('visible'); }
 function hideLoading() { loadingOverlay.classList.remove('visible'); }
 
-logDebug('App initialized successfully (v27)', '#51cf66');
+// Inspector navigation and camera presets
+const paneButtons = document.querySelectorAll('button[data-pane]');
+for (const button of paneButtons) {
+  button.addEventListener('click', () => {
+    for (const item of paneButtons) {
+      const selected = item === button;
+      item.setAttribute('aria-pressed', String(selected));
+      document.getElementById(item.dataset.pane).hidden = !selected;
+    }
+    document.querySelector('.scroll-panel').scrollTop = 0;
+  });
+}
+for (const zone of document.querySelectorAll('.upload-zone')) {
+  zone.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      zone.querySelector('input[type=file]').click();
+    }
+  });
+}
+lithoEnable.addEventListener('change', updateVisibility);
+for (const radio of document.querySelectorAll('input[name=shellShape]')) {
+  radio.addEventListener('change', () => { needsCameraFit = true; });
+}
+
+function setCameraView(view) {
+  const center = new THREE.Vector3(0, 35, 0);
+  const span = new THREE.Vector3(110, 110, 110);
+  if (previewMesh) {
+    const bounds = new THREE.Box3().setFromObject(previewMesh);
+    if (hookMesh) bounds.expandByObject(hookMesh);
+    bounds.getCenter(center);
+    bounds.getSize(span);
+  }
+  const halfFov = THREE.MathUtils.degToRad(camera.fov * 0.5);
+  const width = view === 'top' ? Math.max(span.x, +S.shadowSize.el.value) : Math.max(span.x, span.z);
+  const height = view === 'top' ? width : span.y;
+  const distance = (Math.max(height, width / camera.aspect) / (2 * Math.tan(halfFov)) +
+    Math.max(span.x, span.z) * 0.52) * 1.25;
+  if (view === 'top') center.y = 0;
+  const direction = view === 'top' ? new THREE.Vector3(0, 1, 0.0001) :
+    view === 'side' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(.8, .55, 1.25).normalize();
+  controls.target.copy(center);
+  camera.position.copy(center).addScaledVector(direction, distance);
+  controls.update();
+  for (const button of document.querySelectorAll('[data-view]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.view === view));
+  }
+  requestRender();
+}
+for (const button of document.querySelectorAll('button[data-view]')) {
+  button.addEventListener('click', () => setCameraView(button.dataset.view));
+}
+controls.addEventListener('start', () => {
+  for (const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed', 'false');
+});
+document.getElementById('choosePattern').addEventListener('click', () => fileInput.click());
+document.getElementById('previewDemo').addEventListener('click', () => demoBtn.click());
